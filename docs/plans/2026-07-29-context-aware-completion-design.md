@@ -1,0 +1,9 @@
+# Context-aware 2–4 word completion
+
+## Approved design
+
+Nodaystypst will give the locked Gemma 4 model a bounded view around the caret rather than only an unlabeled prefix. The request contains at most 800 characters total: it reserves up to 160 leading characters from the suffix when the caret is inside existing text, then spends the remaining budget on the most recent prefix characters. The prompt labels text before the caret, the caret itself, and text after the caret so the model can preserve topic, grammar, tense, and sentence flow. Secure fields remain blocked before context extraction, raw snippets remain request-only, and the existing encrypted aggregate style profile is the only personalization data persisted locally.
+
+The model instruction requires exactly 2–4 words and only the insertable continuation. It explicitly forbids explanations, quotation marks, markdown, repeating the end of the prefix, restarting the sentence, or copying the start of the suffix. A deterministic response gate trims formatting, caps output at four words, rejects fewer than two words, rejects repeated prefix endings, and rejects suffix duplication. Boundary spacing remains UTF-16-safe and adapter insertion behavior is unchanged.
+
+The existing one-in-flight actor remains the concurrency boundary. A new keystroke still cancels immediately, increments the generation, and prevents stale results from reaching the overlay. The four-second network timeout only bounds the final current request. Tests cover the total context budget, suffix reservation, structured request messages, 2–4-word validation, repeated-text rejection, suffix-duplication rejection, model/routing privacy policy, and existing cancellation and insertion behavior. Live validation remains Orion first, followed by Bear, Antinote, Ghostty, and ChatGPT macOS.

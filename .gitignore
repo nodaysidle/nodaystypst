@@ -1,0 +1,9 @@
+.build/
+.swiftpm/
+*.app/
+Resources/AppIcon.icns
+.DS_Store
+
+# Local delegation/history artifacts are not part of the public product source.
+docs/ELDIO-TUI-*.md
+docs/superpowers/
