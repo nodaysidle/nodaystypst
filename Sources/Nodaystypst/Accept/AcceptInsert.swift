@@ -41,19 +41,14 @@ enum AcceptInsert {
         )
     }
 
-    /// Codex owns repeated Tab presses for composer focus traversal. Accepting
-    /// its entire already-bounded 2–4-word banner in one synthetic insertion
-    /// avoids leaking a later Tab into the host UI. Other adapters retain the
-    /// normal one-word-at-a-time policy.
+    /// One Tab accepts the entire already-bounded 2–4-word completion. The
+    /// adapter still controls whether Tab may be claimed at all.
     static func acceptance(
         in shownGhost: String,
         bundleID: String
     ) -> WordAcceptance? {
         guard !shownGhost.isEmpty else { return nil }
-        if usesSyntheticTextInsertion(bundleID: bundleID) {
-            return WordAcceptance(accepted: shownGhost, remaining: "")
-        }
-        return nextWord(in: shownGhost)
+        return WordAcceptance(accepted: shownGhost, remaining: "")
     }
 
     /// Returns `true` when Tab should trigger an accept:
@@ -63,19 +58,11 @@ enum AcceptInsert {
         ghostVisible && adapterAllows
     }
 
-    /// Codex's ProseMirror AX value setter replaces the whole document and
-    /// resets its selection to zero. It therefore receives the already-approved
-    /// token through a tagged Unicode key event at the live caret instead.
-    static func usesSyntheticTextInsertion(bundleID: String) -> Bool {
+    /// ChatGPT's ProseMirror editor needs an atomic Accessibility edit. Posting
+    /// the completion as synthetic character events can drop or reorder spaces
+    /// and leading characters under load.
+    static func usesAtomicAccessibilityInsertion(bundleID: String) -> Bool {
         bundleID == codexBundleID
-    }
-
-    /// Codex needs its AX revalidation and synthetic insertion to run after
-    /// the CGEvent tap callback returns. Keeping the callback bounded prevents
-    /// macOS from disabling the tap and letting a later Tab escape into the
-    /// host's focus traversal.
-    static func requiresDeferredTabAcceptance(adapterKind: String) -> Bool {
-        adapterKind == "codex"
     }
 
     /// Resolves the live caret from AX selection metadata when available, or
@@ -106,7 +93,7 @@ enum AcceptInsert {
 /// Cross-app key monitor that watches for Tab / character keystrokes while
 /// the ghost overlay is visible and dispatches accept or reject accordingly.
 ///
-/// Because **nodaystypst** is a non-activating menu-bar app, an ordinary
+/// Because **nodaystypst** inserts into another app without activating it, an ordinary
 /// `NSEvent.addLocalMonitorForEvents` will not capture keystrokes directed
 /// at the host application.  A supplemental **CGEvent tap** is therefore
 /// installed at `.headInsertEventTap` to detect key events system-wide and,
@@ -121,19 +108,17 @@ enum AcceptInsert {
 ///
 /// | Condition | Action |
 /// |---|---|
-/// | Tab + overlay visible + adapter allows | Insert next word, retain remainder, swallow Tab |
+/// | Tab + overlay visible + adapter allows | Insert shown completion and swallow Tab |
 /// | Tab + overlay visible + adapter disallows | Hide, stop, **let Tab pass** |
 /// | Non-Tab character / editing key + overlay visible | Hide, stop, call reject handler |
 /// | Insertion failure (any kind) | Hide, stop, set generic `lastError` |
 ///
-/// No field-content logging. Word splitting is deterministic and local.
+/// No field-content logging.
 @MainActor
 final class AcceptInsertMonitor {
     private enum MonitorError: Error {
         case adapterDisallows
     }
-
-    private static let syntheticInsertionEventTag: Int64 = 0x4E_44_54_59
 
     // MARK: - Dependencies
 
@@ -144,14 +129,13 @@ final class AcceptInsertMonitor {
 
     // MARK: - Private infrastructure
 
-    private var localMonitor: Any?
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     private var rejectHandler: (@MainActor () -> Void)?
     private var acceptanceHandler: (
         @MainActor (String, FieldContext, FieldContext, UInt) -> Void
     )?
-    private var codexAcceptanceScheduled = false
+    private var tabAcceptanceScheduled = false
 
     // MARK: - Init
 
@@ -189,21 +173,11 @@ final class AcceptInsertMonitor {
         acceptanceHandler = handler
     }
 
-    /// Installs both the local NSEvent keyDown monitor and the suppressing
-    /// CGEvent tap.  Only takes effect when the overlay is currently visible.
-    /// Idempotent — subsequent calls while already running are no-ops.
+    /// Installs the suppressing CGEvent tap. Only takes effect when the overlay
+    /// is currently visible. Idempotent — subsequent calls while already running
+    /// are no-ops.
     func start() {
-        guard overlay.isVisible, localMonitor == nil else { return }
-
-        // Local NSEvent keyDown monitor (per plan spec; the real workhorse
-        // is the CGEvent tap, but both are installed for robustness).
-        localMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            var result: NSEvent? = event
-            MainActor.assumeIsolated {
-                result = self?.handleLocalKeyEvent(event) ?? event
-            }
-            return result
-        }
+        guard overlay.isVisible, eventTap == nil else { return }
 
         guard installEventTap() else {
             overlay.hide()
@@ -213,13 +187,8 @@ final class AcceptInsertMonitor {
         }
     }
 
-    /// Removes both the local NSEvent monitor and the CGEvent tap.
-    /// Safe to call when already stopped.
+    /// Removes the CGEvent tap. Safe to call when already stopped.
     func stop() {
-        if let monitor = localMonitor {
-            NSEvent.removeMonitor(monitor)
-            localMonitor = nil
-        }
         removeEventTap()
     }
 
@@ -297,21 +266,13 @@ final class AcceptInsertMonitor {
             return Unmanaged.passUnretained(event)
         }
 
-        if event.getIntegerValueField(.eventSourceUserData)
-            == Self.syntheticInsertionEventTag {
-            return Unmanaged.passUnretained(event)
-        }
-
         if isTab(nsEvent) {
-            if overlay.isVisible,
-               let adapterKind = observer.snapshot?.adapterKind,
-               AcceptInsert.requiresDeferredTabAcceptance(
-                   adapterKind: adapterKind
-               ) {
-                scheduleCodexTabAccept()
+            if overlay.isVisible, canAttemptTabAccept() {
+                scheduleTabAccept()
                 return nil
             }
-            return performTabAccept() ? nil : Unmanaged.passUnretained(event)
+            if overlay.isVisible { handleDisallowed() }
+            return Unmanaged.passUnretained(event)
         }
 
         if isTypingOrEditingKey(nsEvent) {
@@ -320,20 +281,44 @@ final class AcceptInsertMonitor {
         return Unmanaged.passUnretained(event)
     }
 
-    // MARK: - Local NSEvent monitor handler
+    // MARK: - Tab accept (deferred)
 
-    /// Dispatches local-monitor key events.  May not fire for non-activating
-    /// apps, but the CGEvent tap provides the same coverage.
-    private func handleLocalKeyEvent(_ event: NSEvent) -> NSEvent? {
-        guard overlay.isVisible else { return event }
+    /// Cheap pre-check using the cached snapshot. The expensive live AX
+    /// revalidation runs in the deferred task, so the CGEvent tap callback
+    /// stays bounded and macOS never disables the tap mid-press.
+    private func canAttemptTabAccept() -> Bool {
+        guard AccessibilityPermission.isTrusted(),
+              let snapshot = observer.snapshot,
+              !snapshot.isSecure,
+              snapshot.geometryTrusted,
+              let frontApp = NSWorkspace.shared.frontmostApplication,
+              let bundleID = frontApp.bundleIdentifier,
+              bundleID == snapshot.context.bundleID else {
+            return false
+        }
+        let adapter = adapterRegistry.adapter(
+            for: RunningAppInfo(
+                bundleID: bundleID,
+                localizedName: frontApp.localizedName ?? ""
+            ),
+            role: snapshot.context.elementRole
+        )
+        return AcceptInsert.shouldAcceptTab(
+            ghostVisible: overlay.isVisible,
+            adapterAllows: adapter.shouldOfferTabAccept()
+        )
+    }
 
-        if isTab(event) {
-            return performTabAccept() ? nil : event
+    /// Schedules the live AX revalidation + insertion on the next main-actor
+    /// turn so the CGEvent tap callback never exceeds its time budget.
+    private func scheduleTabAccept() {
+        guard !tabAcceptanceScheduled else { return }
+        tabAcceptanceScheduled = true
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.tabAcceptanceScheduled = false }
+            _ = self.performTabAccept()
         }
-        if isTypingOrEditingKey(event) {
-            handleReject()
-        }
-        return event
     }
 
     private func isTab(_ event: NSEvent) -> Bool {
@@ -365,25 +350,15 @@ final class AcceptInsertMonitor {
         }
     }
 
-    // MARK: - Tab accept (next-word insertion)
-
-    /// Swallows Codex's physical Tab immediately, then performs the heavier AX
-    /// validation on the next main-actor turn so the event tap never times out.
-    private func scheduleCodexTabAccept() {
-        guard !codexAcceptanceScheduled else { return }
-        codexAcceptanceScheduled = true
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            defer { self.codexAcceptanceScheduled = false }
-            _ = self.performTabAccept()
-        }
-    }
+    // MARK: - Tab accept
 
     /// Reads the **live** focused AX element's value and caret index,
-    /// derives the active adapter, and inserts the next shown word. Native
-    /// hosts receive an AX value write plus collapsed selection; Codex receives
-    /// a tagged Unicode event at its existing caret because its AX value setter
-    /// resets ProseMirror selection to zero. The overlay then hides.
+    /// derives the active adapter, and inserts the shown completion. Native
+    /// hosts receive an AX value write plus collapsed selection. ChatGPT first
+    /// receives a single selected-text replacement at the verified caret, with
+    /// a guarded full-value fallback only when the editor stayed unchanged.
+    /// Both routes verify the exact resulting value and caret. The overlay then
+    /// hides.
     /// Returns `true` when the Tab must be swallowed. An adapter-disallowed
     /// Tab is allowed through; a failed attempted accept is swallowed so host
     /// focus cannot escape after presenting an actionable ghost.
@@ -392,6 +367,7 @@ final class AcceptInsertMonitor {
             return false
         }
 
+        DebugLog.write("accept: begin ghost_utf16=\(ghostText.utf16.count)")
         do {
             let target = try resolveLiveTarget()
             guard let acceptance = AcceptInsert.acceptance(
@@ -402,7 +378,8 @@ final class AcceptInsertMonitor {
                 stop()
                 return true
             }
-            let usesSyntheticInsertion = AcceptInsert.usesSyntheticTextInsertion(
+            let usesAtomicAccessibilityInsertion = AcceptInsert
+                .usesAtomicAccessibilityInsertion(
                 bundleID: target.bundleID
             )
 
@@ -413,10 +390,14 @@ final class AcceptInsertMonitor {
             )
 
             let insertPoint = target.caretIndex + acceptance.accepted.utf16.count
-            if usesSyntheticInsertion {
-                guard postAcceptedText(acceptance.accepted) else {
-                    throw AdapterError.insertFailed
-                }
+            if usesAtomicAccessibilityInsertion {
+                let route = try insertAtomically(
+                    acceptance.accepted,
+                    into: target,
+                    expectedValue: newValue,
+                    insertPoint: insertPoint
+                )
+                DebugLog.write("accept: atomic AX route=\(route.rawValue)")
             } else {
                 guard AXUIElementSetAttributeValue(
                     target.element,
@@ -436,11 +417,15 @@ final class AcceptInsertMonitor {
                 }
             }
 
+            let updatedWindow = FieldContext.boundedValue(
+                newValue,
+                caretIndex: insertPoint
+            )
             let updatedContext = target.adapter.readContext(
                 bundleID: target.bundleID,
                 role: target.role,
-                fullValue: newValue,
-                caretIndex: insertPoint
+                fullValue: updatedWindow.text,
+                caretIndex: updatedWindow.caretIndex
             )
 
             acceptanceHandler?(
@@ -454,11 +439,17 @@ final class AcceptInsertMonitor {
             if acceptance.remaining.isEmpty {
                 stop()
             }
+            DebugLog.write(
+                "accept: completed bundleID=\(target.bundleID) "
+                + "accepted_utf16=\(acceptance.accepted.utf16.count)"
+            )
             return true
         } catch MonitorError.adapterDisallows {
+            DebugLog.write("accept: adapter disallowed")
             handleDisallowed()
             return false
         } catch {
+            DebugLog.write("accept: failed type=\(String(describing: type(of: error)))")
             overlay.hide()
             preferences.lastError = "Unable to insert completion."
             stop()
@@ -468,44 +459,212 @@ final class AcceptInsertMonitor {
         }
     }
 
-    /// Posts only the accepted completion token. The event is tagged so this
-    /// monitor ignores its own generated keyDown while Codex receives ordinary
-    /// Unicode input at the already-focused caret.
-    private func postAcceptedText(_ text: String) -> Bool {
-        let utf16 = Array(text.utf16)
-        guard !utf16.isEmpty,
-              let source = CGEventSource(stateID: .hidSystemState),
-              let keyDown = CGEvent(
-                  keyboardEventSource: source,
-                  virtualKey: 0,
-                  keyDown: true
-              ),
-              let keyUp = CGEvent(
-                  keyboardEventSource: source,
-                  virtualKey: 0,
-                  keyDown: false
-              ) else {
-            return false
+    private enum AtomicAXInsertionRoute: String {
+        case selectedText
+        case fullValue
+    }
+
+    /// Inserts ChatGPT's bounded completion as one AX edit and verifies the
+    /// exact resulting value before the accept is reported. If selected-text
+    /// replacement is unsupported, the full-value fallback is permitted only
+    /// while the field still equals the value revalidated for this Tab press.
+    private func insertAtomically(
+        _ text: String,
+        into target: LiveTarget,
+        expectedValue: String,
+        insertPoint: Int
+    ) throws -> AtomicAXInsertionRoute {
+        guard !text.isEmpty else { throw AdapterError.insertFailed }
+
+        if setCollapsedSelection(
+            on: target.element,
+            location: target.caretIndex
+        ), AXUIElementSetAttributeValue(
+            target.element,
+            kAXSelectedTextAttribute as CFString,
+            text as CFTypeRef
+        ) == .success,
+           let verifiedElement = waitForValue(
+               expectedValue,
+               originalValue: target.currentValue,
+               target: target
+           ),
+           ensureCollapsedSelection(
+               on: verifiedElement,
+               location: insertPoint,
+               target: target
+           ) {
+            return .selectedText
         }
 
-        utf16.withUnsafeBufferPointer { buffer in
-            guard let baseAddress = buffer.baseAddress else { return }
-            keyDown.keyboardSetUnicodeString(
-                stringLength: buffer.count,
-                unicodeString: baseAddress
-            )
+        // Never replace a value that changed after the live Tab revalidation.
+        guard let unchangedElement = waitForValue(
+            target.currentValue,
+            originalValue: target.currentValue,
+            target: target
+        ) else {
+            throw AdapterError.insertFailed
         }
-        keyDown.setIntegerValueField(
-            .eventSourceUserData,
-            value: Self.syntheticInsertionEventTag
-        )
-        keyUp.setIntegerValueField(
-            .eventSourceUserData,
-            value: Self.syntheticInsertionEventTag
-        )
-        keyDown.post(tap: .cghidEventTap)
-        keyUp.post(tap: .cghidEventTap)
-        return true
+
+        guard AXUIElementSetAttributeValue(
+            unchangedElement,
+            kAXValueAttribute as CFString,
+            expectedValue as CFTypeRef
+        ) == .success,
+              let verifiedElement = waitForValue(
+                  expectedValue,
+                  originalValue: target.currentValue,
+                  target: target
+              ),
+              ensureCollapsedSelection(
+                  on: verifiedElement,
+                  location: insertPoint,
+                  target: target
+              ) else {
+            throw AdapterError.insertFailed
+        }
+
+        return .fullValue
+    }
+
+    /// AX-backed web editors may replace their focused accessibility element
+    /// after a mutation, so verification checks both the original element and
+    /// a freshly resolved focused element for a short bounded interval.
+    private func waitForValue(
+        _ expectedValue: String,
+        originalValue: String,
+        target: LiveTarget
+    ) -> AXUIElement? {
+        var candidate = target.element
+        for attempt in 0..<5 {
+            if axString(candidate, kAXValueAttribute) == expectedValue {
+                return candidate
+            }
+            if let refreshed = refreshedFocusedElement(for: target) {
+                candidate = refreshed
+                if axString(candidate, kAXValueAttribute) == expectedValue {
+                    return candidate
+                }
+            }
+            if attempt < 4 {
+                Thread.sleep(forTimeInterval: 0.01)
+            }
+        }
+
+        // `originalValue` is intentionally accepted only by callers that use
+        // it as an unchanged-state guard before the full-value fallback.
+        return expectedValue == originalValue
+            && axString(candidate, kAXValueAttribute) == originalValue
+            ? candidate
+            : nil
+    }
+
+    private func ensureCollapsedSelection(
+        on element: AXUIElement,
+        location: Int,
+        target: LiveTarget
+    ) -> Bool {
+        var candidate = element
+        for attempt in 0..<3 {
+            if isCollapsedSelection(on: candidate, location: location) {
+                return true
+            }
+            if setCollapsedSelection(on: candidate, location: location),
+               isCollapsedSelection(on: candidate, location: location) {
+                return true
+            }
+            if let refreshed = refreshedFocusedElement(for: target) {
+                candidate = refreshed
+            }
+            if attempt < 2 {
+                Thread.sleep(forTimeInterval: 0.01)
+            }
+        }
+        return false
+    }
+
+    private func isCollapsedSelection(
+        on element: AXUIElement,
+        location: Int
+    ) -> Bool {
+        guard let range = selectedTextRange(on: element) else { return false }
+        return range.location == location && range.length == 0
+    }
+
+    private func setCollapsedSelection(
+        on element: AXUIElement,
+        location: Int
+    ) -> Bool {
+        var cfRange = CFRange(location: location, length: 0)
+        guard let rangeAX = AXValueCreate(.cfRange, &cfRange) else {
+            return false
+        }
+        return AXUIElementSetAttributeValue(
+            element,
+            kAXSelectedTextRangeAttribute as CFString,
+            rangeAX
+        ) == .success
+    }
+
+    private func selectedTextRange(on element: AXUIElement) -> CFRange? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            element,
+            kAXSelectedTextRangeAttribute as CFString,
+            &value
+        ) == .success,
+              let value,
+              CFGetTypeID(value) == AXValueGetTypeID() else {
+            return nil
+        }
+        let rangeValue = value as! AXValue
+        var range = CFRange(location: 0, length: 0)
+        return AXValueGetValue(rangeValue, .cfRange, &range) ? range : nil
+    }
+
+    private func refreshedFocusedElement(for target: LiveTarget) -> AXUIElement? {
+        guard NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+            == target.bundleID else {
+            return nil
+        }
+
+        let systemWide = AXUIElementCreateSystemWide()
+        var focusedValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            systemWide,
+            kAXFocusedUIElementAttribute as CFString,
+            &focusedValue
+        ) == .success,
+              let focusedValue,
+              CFGetTypeID(focusedValue) == AXUIElementGetTypeID() else {
+            return nil
+        }
+        let element = focusedValue as! AXUIElement
+        let role = axString(element, kAXRoleAttribute)
+        let subrole = axString(element, kAXSubroleAttribute)
+        let metadata = [
+            subrole,
+            axString(element, kAXIdentifierAttribute),
+            axString(element, kAXTitleAttribute),
+            axString(element, kAXDescriptionAttribute),
+            axString(element, kAXHelpAttribute),
+        ].compactMap { $0 }
+
+        guard role == target.role,
+              !target.adapter.isSecure(
+                  role: role,
+                  subrole: subrole,
+                  isPasswordField: axBool(element, "AXIsPassword")
+                      || axBool(element, "AXIsPasswordField")
+              ),
+              SupportedAppPolicy.allowsField(
+                  bundleID: target.bundleID,
+                  role: role,
+                  metadata: metadata
+              ) else {
+            return nil
+        }
+        return element
     }
 
     // MARK: - Reject (non-Tab key while ghost visible)
@@ -563,9 +722,11 @@ final class AcceptInsertMonitor {
             kAXFocusedUIElementAttribute as CFString,
             &focusedVal
         ) == .success,
-              let focusedElement = focusedVal as! AXUIElement? else {
+              let focused = focusedVal,
+              CFGetTypeID(focused) == AXUIElementGetTypeID() else {
             throw AdapterError.insertFailed
         }
+        let focusedElement = focused as! AXUIElement
 
         let role = axString(focusedElement, kAXRoleAttribute)
         let subrole = axString(focusedElement, kAXSubroleAttribute)
@@ -577,11 +738,24 @@ final class AcceptInsertMonitor {
         )
         let adapter = adapterRegistry.adapter(for: appInfo, role: role)
 
+        let fieldMetadata = [
+            subrole,
+            axString(focusedElement, kAXIdentifierAttribute),
+            axString(focusedElement, kAXTitleAttribute),
+            axString(focusedElement, kAXDescriptionAttribute),
+            axString(focusedElement, kAXHelpAttribute),
+        ].compactMap { $0 }
+
         guard !adapter.isSecure(
             role: role,
             subrole: subrole,
             isPasswordField: isPasswordField
         ),
+              SupportedAppPolicy.allowsField(
+                  bundleID: bundleID,
+                  role: role,
+                  metadata: fieldMetadata
+              ),
               snapshot.context.elementRole == (role ?? "") else {
             throw AdapterError.insertFailed
         }
@@ -608,11 +782,13 @@ final class AcceptInsertMonitor {
             kAXSelectedTextRangeAttribute as CFString,
             &rangeVal
         ) == .success,
-           let axValue = rangeVal as! AXValue? {
-            var range = CFRange(location: 0, length: 0)
-            if AXValueGetValue(axValue, .cfRange, &range) {
-                selectedLocation = range.location
-                selectedLength = range.length
+           let range = rangeVal,
+           CFGetTypeID(range) == AXValueGetTypeID() {
+            let axValue = range as! AXValue
+            var cfRange = CFRange(location: 0, length: 0)
+            if AXValueGetValue(axValue, .cfRange, &cfRange) {
+                selectedLocation = cfRange.location
+                selectedLength = cfRange.length
             }
         }
 
@@ -625,11 +801,15 @@ final class AcceptInsertMonitor {
             throw AdapterError.insertFailed
         }
 
+        let liveWindow = FieldContext.boundedValue(
+            currentValue,
+            caretIndex: caretIndex
+        )
         let liveContext = adapter.readContext(
             bundleID: bundleID,
             role: role ?? "",
-            fullValue: currentValue,
-            caretIndex: caretIndex
+            fullValue: liveWindow.text,
+            caretIndex: liveWindow.caretIndex
         )
         guard liveContext == snapshot.context else {
             throw AdapterError.insertFailed

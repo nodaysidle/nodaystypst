@@ -21,7 +21,7 @@
     <key>LSMinimumSystemVersion</key>
     <string>15.0</string>
     <key>LSUIElement</key>
-    <true/>
+    <false/>
     <key>NSAccessibilityUsageDescription</key>
     <string>nodaystypst uses Accessibility to read focused text-field context and insert accepted completions.</string>
 </dict>

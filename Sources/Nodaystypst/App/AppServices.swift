@@ -1,8 +1,11 @@
+import AppKit
 import Observation
 
 @MainActor
 @Observable
 final class AppServices {
+    static let shared = AppServices()
+
     let preferences: AppPreferences
     let keychainStore: KeychainStore
     let writingStyleStore: WritingStyleStore
@@ -10,6 +13,8 @@ final class AppServices {
 
     let accessibilityObserver: AccessibilityObserver
     let completionCoordinator: CompletionCoordinator
+
+    private var terminateObserver: NSObjectProtocol?
 
     init(
         preferences: AppPreferences = AppPreferences(),
@@ -40,6 +45,18 @@ final class AppServices {
             accessibilityObserver.start()
             completionCoordinator.start()
         }
+
+        terminateObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification,
+            object: nil,
+            queue: .main
+        ) { [writingStyleStore] _ in
+            Task { await writingStyleStore.flushPending() }
+        }
+
+        completionCoordinator.updateAccessibilityTrustedProvider(
+            { [weak self] in self?.accessibilityTrusted ?? false }
+        )
     }
 
     func start() {

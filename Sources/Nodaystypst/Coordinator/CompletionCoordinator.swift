@@ -51,6 +51,15 @@ final class CompletionCoordinator {
         !isPaused && axTrusted && !snapshotSecure && geometryTrusted && hasAPIKey
     }
 
+    /// Suppresses conversational answers when the caret follows a question.
+    /// Whitespace after `?` remains suppressed until the user starts the next
+    /// sentence with a non-whitespace character.
+    nonisolated static func shouldSuppressAfterQuestionMark(
+        prefix: String
+    ) -> Bool {
+        prefix.last(where: { !$0.isWhitespace }) == "?"
+    }
+
     // MARK: - Dependencies
 
     private let observer: AccessibilityObserver
@@ -59,6 +68,7 @@ final class CompletionCoordinator {
     private let preferences: AppPreferences
     private let keychainStore: KeychainStore
     private let writingStyleStore: WritingStyleStore
+    private var isAccessibilityTrusted: @MainActor () -> Bool
 
     // MARK: - Private state
 
@@ -70,6 +80,11 @@ final class CompletionCoordinator {
     private var acceptedContinuation: AcceptedContinuation?
     private var learningTask: Task<Void, Never>?
 
+    // Non-sensitive state exposed in the Settings diagnostics section.
+    private(set) var lastInteraction = "None"
+    var isRunningForDiagnostics: Bool { isRunning }
+    var isOverlayVisibleForDiagnostics: Bool { overlay.isVisible }
+
     // MARK: - Initialisation
 
     init(
@@ -78,7 +93,8 @@ final class CompletionCoordinator {
         overlay: GhostOverlay,
         preferences: AppPreferences,
         keychainStore: KeychainStore,
-        writingStyleStore: WritingStyleStore
+        writingStyleStore: WritingStyleStore,
+        isAccessibilityTrusted: @escaping @MainActor () -> Bool = AccessibilityPermission.isTrusted
     ) {
         self.observer = observer
         self.predictClient = predictClient
@@ -86,9 +102,16 @@ final class CompletionCoordinator {
         self.preferences = preferences
         self.keychainStore = keychainStore
         self.writingStyleStore = writingStyleStore
+        self.isAccessibilityTrusted = isAccessibilityTrusted
     }
 
     // MARK: - Lifecycle
+
+    func updateAccessibilityTrustedProvider(
+        _ provider: @escaping @MainActor () -> Bool
+    ) {
+        isAccessibilityTrusted = provider
+    }
 
     /// Starts the prediction loop.  Idempotent — a second call is a no-op
     /// when the coordinator is already running.
@@ -105,6 +128,7 @@ final class CompletionCoordinator {
             )
             acceptMonitor?.setRejectHandler { [weak self] in
                 guard let self else { return }
+                self.lastInteraction = "Rejected by continued typing"
                 self.acceptedContinuation = nil
                 self.debounceTask?.cancel()
                 self.debounceTask = nil
@@ -115,6 +139,7 @@ final class CompletionCoordinator {
             acceptMonitor?.setAcceptanceHandler {
                 [weak self] remainder, previousContext, expectedContext, fieldID in
                 guard let self else { return }
+                self.lastInteraction = "Accepted with Tab"
                 self.acceptedContinuation = AcceptedContinuation(
                     previousContext: previousContext,
                     expectedContext: expectedContext,
@@ -189,7 +214,7 @@ final class CompletionCoordinator {
         // Read current snapshot and preferences.
         let snap = observer.snapshot
         let paused = preferences.isPaused
-        let axTrusted = AccessibilityPermission.isTrusted()
+        let axTrusted = isAccessibilityTrusted()
 
         if let acceptedContinuation {
             if let snap, snap.context == acceptedContinuation.expectedContext {
@@ -235,15 +260,29 @@ final class CompletionCoordinator {
                   bundleID: snap.context.bundleID
               ),
               !snap.context.prefix.isEmpty,
+              !Self.shouldSuppressAfterQuestionMark(
+                  prefix: snap.context.prefix
+              ),
               !paused,
               axTrusted,
               !snap.isSecure,
               snap.geometryTrusted,
               snap.caretRect != nil else {
+            DebugLog.write(
+                "handleStateChange: gate failed "
+                + "snapNil=\(snap == nil) "
+                + "prefixEmpty=\(snap?.context.prefix.isEmpty ?? true) "
+                + "questionBoundary=\(snap.map { Self.shouldSuppressAfterQuestionMark(prefix: $0.context.prefix) } ?? false) "
+                + "paused=\(paused) axTrusted=\(axTrusted) "
+                + "secure=\(snap?.isSecure ?? true) "
+                + "geometryTrusted=\(snap?.geometryTrusted ?? false) "
+                + "caretRect=\(snap?.caretRect != nil)"
+            )
             debounceTask = Task { await predictClient.cancel() }
             return
         }
 
+        DebugLog.write("handleStateChange: gates passed bundleID=\(snap.context.bundleID) starting debounce")
         // --- Debounce → predict → overlay ---
         debounceTask = Task { [weak self] in
             guard let self else { return }
@@ -266,10 +305,13 @@ final class CompletionCoordinator {
                   let currentSnap = self.observer.snapshot,
                   currentSnap == snap,
                   !currentSnap.context.prefix.isEmpty,
+                  !Self.shouldSuppressAfterQuestionMark(
+                      prefix: currentSnap.context.prefix
+                  ),
                   currentSnap.caretRect != nil,
                   CompletionCoordinator.shouldPredict(
                       isPaused: self.preferences.isPaused,
-                      axTrusted: AccessibilityPermission.isTrusted(),
+                      axTrusted: self.isAccessibilityTrusted(),
                       snapshotSecure: currentSnap.isSecure,
                       geometryTrusted: currentSnap.geometryTrusted,
                       hasAPIKey: self.keychainHasAPIKey()
@@ -305,7 +347,7 @@ final class CompletionCoordinator {
             guard self.isRunning,
                   self.generation == currentGen,
                   !self.preferences.isPaused,
-                  AccessibilityPermission.isTrusted(),
+                  self.isAccessibilityTrusted(),
                   let latestSnapshot = self.observer.snapshot,
                   latestSnapshot == currentSnap,
                   !latestSnapshot.isSecure,
@@ -319,6 +361,8 @@ final class CompletionCoordinator {
 
             switch result {
             case .success(let text):
+                self.preferences.lastError = nil
+                DebugLog.write("predict: success length=\(text.count)")
                 if GhostOverlay.shouldPresent(
                     text: text,
                     geometryTrusted: latestSnapshot.geometryTrusted
@@ -332,14 +376,19 @@ final class CompletionCoordinator {
                             for: latestSnapshot.adapterKind
                         )
                     )
+                    self.lastInteraction = "Suggestion shown"
+                    DebugLog.write("overlay.show: length=\(text.count) rect=\(latestCaretRect)")
                 } else {
+                    DebugLog.write("predict: shouldPresent=false length=\(text.count)")
                     self.hideOverlay()
                 }
 
             case .cancelled, .timedOut, .stale:
+                DebugLog.write("predict: \(result) for bundleID=\(latestSnapshot.context.bundleID)")
                 self.hideOverlay()
 
             case .failed(let message):
+                DebugLog.write("predict: failed")
                 self.hideOverlay()
                 // Only .failed writes to preferences.lastError (non-sensitive).
                 self.preferences.lastError = message

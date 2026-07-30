@@ -11,7 +11,7 @@ cd "$ROOT"
 APP_NAME=${APP_NAME:-Nodaystypst}
 BUNDLE_ID=${BUNDLE_ID:-com.nodays.nodaystypst}
 MACOS_MIN_VERSION=${MACOS_MIN_VERSION:-15.0}
-MENU_BAR_APP=${MENU_BAR_APP:-1}
+MENU_BAR_APP=${MENU_BAR_APP:-0}
 APP_ENTITLEMENTS=${APP_ENTITLEMENTS:-$ROOT/Resources/Nodaystypst.entitlements}
 
 source "$ROOT/version.env"
@@ -35,6 +35,11 @@ if [[ "$MENU_BAR_APP" == "1" ]]; then
     /usr/libexec/PlistBuddy -c "Set :LSUIElement true" "$APP/Contents/Info.plist"
 else
     /usr/libexec/PlistBuddy -c "Set :LSUIElement false" "$APP/Contents/Info.plist"
+fi
+
+if [[ "${NODAYSTYPST_DEBUG_LOG:-0}" == "1" ]]; then
+    /usr/libexec/PlistBuddy -c "Add :LSEnvironment dict" "$APP/Contents/Info.plist" 2>/dev/null || true
+    /usr/libexec/PlistBuddy -c "Add :LSEnvironment:NODAYSTYPST_DEBUG_LOG string 1" "$APP/Contents/Info.plist" 2>/dev/null || true
 fi
 
 find "$BIN_DIR" -maxdepth 1 -name '*.bundle' -exec cp -R {} "$APP/Contents/Resources/" \;

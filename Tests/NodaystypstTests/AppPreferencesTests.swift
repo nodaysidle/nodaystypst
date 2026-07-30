@@ -5,7 +5,7 @@ import Testing
 @Suite("App preferences")
 @MainActor
 struct AppPreferencesTests {
-    @Test("retired default migrates to Gemma while custom choice remains")
+    @Test("retired defaults migrate to Gemma while custom choice remains")
     func modelMigration() {
         let suiteName = "nodaystypst-preferences-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
@@ -13,6 +13,10 @@ struct AppPreferencesTests {
 
         defaults.set("mistralai/ministral-3b-2512", forKey: "modelId")
         var preferences = AppPreferences(defaults: defaults)
+        #expect(preferences.modelId == "google/gemma-4-26b-a4b-it")
+
+        defaults.set("mistralai/mistral-nemo", forKey: "modelId")
+        preferences = AppPreferences(defaults: defaults)
         #expect(preferences.modelId == "google/gemma-4-26b-a4b-it")
 
         defaults.set("custom/model", forKey: "modelId")

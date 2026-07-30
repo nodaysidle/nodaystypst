@@ -6,6 +6,20 @@ struct FieldContext: Equatable, Sendable {
         let suffix: String
     }
 
+    struct UTF16ContextWindow: Equatable, Sendable {
+        let prefixLocation: Int
+        let prefixLength: Int
+        let suffixLocation: Int
+        let suffixLength: Int
+
+        var localCaretIndex: Int { prefixLength }
+    }
+
+    struct BoundedValue: Equatable, Sendable {
+        let text: String
+        let caretIndex: Int
+    }
+
     var prefix: String
     var suffix: String
     var bundleID: String
@@ -20,6 +34,58 @@ struct FieldContext: Equatable, Sendable {
             return raw
         }
         return String(raw.suffix(limit))
+    }
+
+    /// Returns the small UTF-16 ranges needed around an AX caret. Accessibility
+    /// offsets are UTF-16 based, so this is also used when revalidating a live
+    /// field immediately before insertion.
+    static func utf16ContextWindow(
+        caretIndex: Int,
+        totalLength: Int
+    ) -> UTF16ContextWindow {
+        let safeTotal = max(0, totalLength)
+        let safeCaret = min(max(0, caretIndex), safeTotal)
+        let prefixLength = min(
+            safeCaret,
+            PredictionConstants.maxPrefixCharacters
+        )
+        let suffixLength = min(
+            safeTotal - safeCaret,
+            PredictionConstants.maxSuffixCharacters
+        )
+        return UTF16ContextWindow(
+            prefixLocation: safeCaret - prefixLength,
+            prefixLength: prefixLength,
+            suffixLocation: safeCaret,
+            suffixLength: suffixLength
+        )
+    }
+
+    static func boundedValue(
+        _ fullValue: String,
+        caretIndex: Int
+    ) -> BoundedValue {
+        let ranges = utf16ContextWindow(
+            caretIndex: caretIndex,
+            totalLength: fullValue.utf16.count
+        )
+        let prefixStart = String.Index(
+            utf16Offset: ranges.prefixLocation,
+            in: fullValue
+        )
+        let caret = String.Index(
+            utf16Offset: ranges.suffixLocation,
+            in: fullValue
+        )
+        let suffixEnd = String.Index(
+            utf16Offset: ranges.suffixLocation + ranges.suffixLength,
+            in: fullValue
+        )
+        return BoundedValue(
+            text: String(fullValue[prefixStart..<caret])
+                + String(fullValue[caret..<suffixEnd]),
+            caretIndex: ranges.localCaretIndex
+        )
     }
 
     /// Builds the only raw text window allowed onto the prediction wire.

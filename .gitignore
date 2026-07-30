@@ -5,5 +5,9 @@ Resources/AppIcon.icns
 .DS_Store
 
 # Local delegation/history artifacts are not part of the public product source.
+GOAL.md
+HANDOFF_AGENT.md
+RESULT.md
+WORKLOG.md
 docs/ELDIO-TUI-*.md
 docs/superpowers/

@@ -16,12 +16,22 @@ struct FocusedFieldSnapshot: Equatable {
     let adapterKind: String
 }
 
+struct AccessibilityDiagnostics: Equatable {
+    let bundleID: String
+    let role: String
+    let adapterKind: String
+    let fieldDecision: String
+    let isSecure: Bool
+    let geometryTrusted: Bool
+}
+
 // MARK: - AccessibilityObserver
 
 @MainActor
 @Observable
 final class AccessibilityObserver {
     private(set) var snapshot: FocusedFieldSnapshot?
+    private(set) var lastDiagnostics: AccessibilityDiagnostics?
 
     private var observer: AXObserver?
     private var runLoopSource: CFRunLoopSource?
@@ -102,7 +112,9 @@ final class AccessibilityObserver {
         let selfPtr = Unmanaged.passUnretained(self).toOpaque()
 
         guard AXObserverCreate(pid, axCallback, &observer) == .success,
-              let observer else { return }
+              let observer else {
+            return
+        }
 
         // Observe focused-element changes on the application element
         let appElement = AXUIElementCreateApplication(pid)
@@ -141,14 +153,9 @@ final class AccessibilityObserver {
             self.observedFocusedElement = nil
         }
 
-        let systemWide = AXUIElementCreateSystemWide()
-        var focusedVal: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(
-            systemWide,
-            kAXFocusedUIElementAttribute as CFString,
-            &focusedVal
-        ) == .success,
-              let focusedElement = focusedVal as! AXUIElement? else { return }
+        guard let focusedElement = focusedElement(for: currentPID) else {
+            return
+        }
 
         observedFocusedElement = focusedElement
         AXObserverAddNotification(
@@ -226,6 +233,7 @@ final class AccessibilityObserver {
             },
             userInfo: selfPointer
         ) else {
+            DebugLog.write("contentBlind: tapCreate FAILED (Accessibility not granted?)")
             return
         }
 
@@ -235,6 +243,7 @@ final class AccessibilityObserver {
             0
         ) else {
             CFMachPortInvalidate(tap)
+            DebugLog.write("contentBlind: runLoopSource FAILED")
             return
         }
 
@@ -242,6 +251,7 @@ final class AccessibilityObserver {
         contentBlindRunLoopSource = source
         CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
+        DebugLog.write("contentBlind: tap installed and enabled")
     }
 
     private func removeContentBlindRefreshTap() {
@@ -258,6 +268,7 @@ final class AccessibilityObserver {
 
     private func handleContentBlindEvent(type: CGEventType) {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            DebugLog.write("contentBlind: tap disabled (re-enabling) type=\(type.rawValue)")
             if let contentBlindEventTap {
                 CGEvent.tapEnable(tap: contentBlindEventTap, enable: true)
             }
@@ -265,11 +276,14 @@ final class AccessibilityObserver {
         }
         guard type == .keyDown else { return }
 
-        guard isRunning,
-              let bundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
-              Self.shouldUseContentBlindRefresh(bundleID: bundleID) else {
+        guard isRunning else {
+            DebugLog.write("contentBlind: skip (observer not running)")
             return
         }
+        let frontBundle = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "none"
+        let shouldRefresh = Self.shouldUseContentBlindRefresh(bundleID: frontBundle)
+        DebugLog.write("contentBlind: keyDown frontBundle=\(frontBundle) shouldRefresh=\(shouldRefresh)")
+        guard shouldRefresh else { return }
 
         contentBlindRefreshTask?.cancel()
         contentBlindRefreshTask = Task { @MainActor [weak self] in
@@ -283,11 +297,13 @@ final class AccessibilityObserver {
 
     private func updateSnapshot() {
         guard AccessibilityPermission.isTrusted() else {
+            DebugLog.write("updateSnapshot: AX not trusted, snapshot=nil")
             snapshot = nil
             return
         }
 
         guard let frontApp = NSWorkspace.shared.frontmostApplication else {
+            DebugLog.write("updateSnapshot: no frontmost app, snapshot=nil")
             snapshot = nil
             return
         }
@@ -295,15 +311,14 @@ final class AccessibilityObserver {
         let bundleID = frontApp.bundleIdentifier ?? "unknown"
         let appName = frontApp.localizedName ?? "Unknown"
         let appInfo = RunningAppInfo(bundleID: bundleID, localizedName: appName)
+        DebugLog.write("updateSnapshot: frontmost=\(appName) bundleID=\(bundleID)")
 
-        let systemWide = AXUIElementCreateSystemWide()
-        var focusedVal: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(
-            systemWide,
-            kAXFocusedUIElementAttribute as CFString,
-            &focusedVal
-        ) == .success,
-              let focusedElement = focusedVal as! AXUIElement? else {
+        guard let focusedElement = focusedElement(
+            for: frontApp.processIdentifier
+        ) else {
+            DebugLog.write(
+                "updateSnapshot: focused element unavailable bundleID=\(bundleID)"
+            )
             snapshot = nil
             return
         }
@@ -326,6 +341,7 @@ final class AccessibilityObserver {
         let fieldBounds = axBounds(focusedElement)
 
         if isSecure {
+            DebugLog.write("updateSnapshot: SECURE field blocked bundleID=\(bundleID) role=\(role ?? "nil")")
             snapshot = FocusedFieldSnapshot(
                 fieldID: CFHash(focusedElement),
                 context: FieldContext(
@@ -340,12 +356,21 @@ final class AccessibilityObserver {
                 geometryTrusted: false,
                 adapterKind: adapterKind
             )
+            updateDiagnosticsIfKnown(
+                bundleID: bundleID,
+                role: role,
+                adapterKind: adapterKind,
+                fieldDecision: "Secure field blocked",
+                isSecure: true,
+                geometryTrusted: false
+            )
             return
         }
 
-        // Stay content-blind outside the two user-selected targets. This also
+        // Stay content-blind outside the supported targets. This also
         // prevents prediction, learning, overlays, and Tab monitoring there.
         guard SupportedAppPolicy.allowsPredictions(bundleID: bundleID) else {
+            DebugLog.write("updateSnapshot: bundle not in allowlist bundleID=\(bundleID)")
             snapshot = FocusedFieldSnapshot(
                 fieldID: CFHash(focusedElement),
                 context: FieldContext(
@@ -363,17 +388,74 @@ final class AccessibilityObserver {
             return
         }
 
-        let fullValue = axString(focusedElement, kAXValueAttribute) ?? ""
+
+        let fieldMetadata = [
+            subrole,
+            axString(focusedElement, kAXIdentifierAttribute),
+            axString(focusedElement, kAXTitleAttribute),
+            axString(focusedElement, kAXDescriptionAttribute),
+            axString(focusedElement, kAXHelpAttribute),
+        ].compactMap { $0 }
+        guard SupportedAppPolicy.allowsField(
+            bundleID: bundleID,
+            role: role,
+            metadata: fieldMetadata
+        ) else {
+            DebugLog.write(
+                "updateSnapshot: field rejected before content bundleID=\(bundleID) role=\(role ?? "nil")"
+            )
+            snapshot = FocusedFieldSnapshot(
+                fieldID: CFHash(focusedElement),
+                context: FieldContext(
+                    prefix: "",
+                    suffix: "",
+                    bundleID: bundleID,
+                    elementRole: role ?? ""
+                ),
+                caretRect: nil,
+                fieldBounds: fieldBounds,
+                isSecure: false,
+                geometryTrusted: false,
+                adapterKind: adapterKind
+            )
+            updateDiagnosticsIfKnown(
+                bundleID: bundleID,
+                role: role,
+                adapterKind: adapterKind,
+                fieldDecision: "Rejected before content",
+                isSecure: false,
+                geometryTrusted: false
+            )
+            return
+        }
+
         let selectedRange = axSelectedTextRange(focusedElement)
-        let caretIndex = selectedRange.map { $0.location + $0.length }
-            ?? fullValue.utf16.count
+        guard let contextValue = axContextValue(
+            focusedElement,
+            selectedRange: selectedRange
+        ) else {
+            snapshot = nil
+            updateDiagnosticsIfKnown(
+                bundleID: bundleID,
+                role: role,
+                adapterKind: adapterKind,
+                fieldDecision: "Unreadable AX value",
+                isSecure: false,
+                geometryTrusted: false
+            )
+            return
+        }
+        let fieldID = CFHash(focusedElement)
         let context = adapter.readContext(
             bundleID: bundleID,
             role: role ?? "",
-            fullValue: fullValue,
-            caretIndex: caretIndex
+            fullValue: contextValue.value,
+            caretIndex: contextValue.localCaretIndex
         )
-        let caretBounds = axCaretBounds(at: caretIndex, from: focusedElement)
+        let caretBounds = axCaretBounds(
+            at: contextValue.absoluteCaretIndex,
+            from: focusedElement
+        )
         let caretRect = adapter.caretScreenRect(
             proposed: caretBounds,
             fieldBounds: fieldBounds
@@ -384,7 +466,7 @@ final class AccessibilityObserver {
         )
 
         snapshot = FocusedFieldSnapshot(
-            fieldID: CFHash(focusedElement),
+            fieldID: fieldID,
             context: context,
             caretRect: caretRect,
             fieldBounds: fieldBounds,
@@ -392,9 +474,149 @@ final class AccessibilityObserver {
             geometryTrusted: geometryTrusted,
             adapterKind: adapterKind
         )
+        updateDiagnosticsIfKnown(
+            bundleID: bundleID,
+            role: role,
+            adapterKind: adapterKind,
+            fieldDecision: "Eligible editable field",
+            isSecure: false,
+            geometryTrusted: geometryTrusted
+        )
+        DebugLog.write(
+            "updateSnapshot: built snap bundleID=\(bundleID) role=\(role ?? "nil") "
+            + "context_utf16=\(contextValue.value.utf16.count) "
+            + "caretIndex=\(contextValue.absoluteCaretIndex) "
+            + "caretRect=\(caretRect.map { "\($0)" } ?? "nil") "
+            + "fieldBounds=\(fieldBounds.map { "\($0)" } ?? "nil") "
+            + "geometryTrusted=\(geometryTrusted)"
+        )
+    }
+
+    private func updateDiagnosticsIfKnown(
+        bundleID: String,
+        role: String?,
+        adapterKind: String,
+        fieldDecision: String,
+        isSecure: Bool,
+        geometryTrusted: Bool
+    ) {
+        guard SupportedAppPolicy.allowsPredictions(bundleID: bundleID) else {
+            return
+        }
+        lastDiagnostics = AccessibilityDiagnostics(
+            bundleID: bundleID,
+            role: role ?? "Unknown",
+            adapterKind: adapterKind,
+            fieldDecision: fieldDecision,
+            isSecure: isSecure,
+            geometryTrusted: geometryTrusted
+        )
     }
 
     // MARK: - AX Attribute Helpers
+
+    /// Some Electron hosts do not publish their focused editor through the
+    /// system-wide element, but do expose it on their application element.
+    /// Prefer the app-scoped query and retain the system-wide query as a
+    /// compatibility fallback for native hosts.
+    private func focusedElement(for pid: pid_t) -> AXUIElement? {
+        let appElement = AXUIElementCreateApplication(pid)
+        if let focused = axElement(
+            appElement,
+            attribute: kAXFocusedUIElementAttribute
+        ) {
+            return focused
+        }
+
+        return axElement(
+            AXUIElementCreateSystemWide(),
+            attribute: kAXFocusedUIElementAttribute
+        )
+    }
+
+    private func axElement(
+        _ element: AXUIElement,
+        attribute: String
+    ) -> AXUIElement? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            element,
+            attribute as CFString,
+            &value
+        ) == .success,
+              let candidate = value,
+              CFGetTypeID(candidate) == AXUIElementGetTypeID() else {
+            return nil
+        }
+        return (candidate as! AXUIElement)
+    }
+
+    private struct AXContextValue {
+        let value: String
+        let localCaretIndex: Int
+        let absoluteCaretIndex: Int
+    }
+
+    /// Prefer AX's parameterized range API so each keystroke reads at most the
+    /// bounded caret window. Hosts that do not expose it fall back to one full
+    /// read without caching the document in this process.
+    private func axContextValue(
+        _ element: AXUIElement,
+        selectedRange: CFRange?
+    ) -> AXContextValue? {
+        if let selectedRange,
+           let totalLength = axInt(element, kAXNumberOfCharactersAttribute) {
+            let requestedCaret = selectedRange.location + selectedRange.length
+            let ranges = FieldContext.utf16ContextWindow(
+                caretIndex: requestedCaret,
+                totalLength: totalLength
+            )
+            let prefix = ranges.prefixLength == 0
+                ? ""
+                : axString(
+                    element,
+                    range: CFRange(
+                        location: ranges.prefixLocation,
+                        length: ranges.prefixLength
+                    )
+                )
+            let suffix = ranges.suffixLength == 0
+                ? ""
+                : axString(
+                    element,
+                    range: CFRange(
+                        location: ranges.suffixLocation,
+                        length: ranges.suffixLength
+                    )
+                )
+            if let prefix, let suffix {
+                return AXContextValue(
+                    value: prefix + suffix,
+                    localCaretIndex: prefix.utf16.count,
+                    absoluteCaretIndex: ranges.suffixLocation
+                )
+            }
+        }
+
+        guard let fullValue = axString(element, kAXValueAttribute) else {
+            return nil
+        }
+        let absoluteCaretIndex = selectedRange.map {
+            $0.location + $0.length
+        } ?? fullValue.utf16.count
+        let bounded = FieldContext.boundedValue(
+            fullValue,
+            caretIndex: absoluteCaretIndex
+        )
+        return AXContextValue(
+            value: bounded.text,
+            localCaretIndex: bounded.caretIndex,
+            absoluteCaretIndex: min(
+                max(0, absoluteCaretIndex),
+                fullValue.utf16.count
+            )
+        )
+    }
 
     private func axString(_ element: AXUIElement, _ attribute: String) -> String? {
         var val: CFTypeRef?
@@ -412,16 +634,51 @@ final class AccessibilityObserver {
         return (val as? Bool) ?? false
     }
 
+    private func axInt(_ element: AXUIElement, _ attribute: String) -> Int? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            element,
+            attribute as CFString,
+            &value
+        ) == .success,
+              let number = value as? NSNumber else {
+            return nil
+        }
+        let result = number.intValue
+        return result >= 0 ? result : nil
+    }
+
+    private func axString(_ element: AXUIElement, range: CFRange) -> String? {
+        var mutableRange = range
+        guard let rangeValue = AXValueCreate(.cfRange, &mutableRange) else {
+            return nil
+        }
+        var value: CFTypeRef?
+        guard AXUIElementCopyParameterizedAttributeValue(
+            element,
+            kAXStringForRangeParameterizedAttribute as CFString,
+            rangeValue,
+            &value
+        ) == .success else {
+            return nil
+        }
+        return value as? String
+    }
+
     private func axSelectedTextRange(_ element: AXUIElement) -> CFRange? {
         var val: CFTypeRef?
         guard AXUIElementCopyAttributeValue(
             element,
             kAXSelectedTextRangeAttribute as CFString,
             &val
-        ) == .success,
-              let axValue = val as! AXValue? else {
+        ) == .success else {
             return nil
         }
+        guard let candidate = val else { return nil }
+        guard CFGetTypeID(candidate) == AXValueGetTypeID() else {
+            return nil
+        }
+        let axValue = candidate as! AXValue
         var range = CFRange(location: 0, length: 0)
         guard AXValueGetValue(axValue, .cfRange, &range),
               range.location >= 0,
@@ -437,35 +694,111 @@ final class AccessibilityObserver {
         var position = CGPoint.zero
         var size = CGSize.zero
 
-        if AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &posVal) == .success,
-           let axPos = posVal as! AXValue? {
-            AXValueGetValue(axPos, .cgPoint, &position)
+        guard AXUIElementCopyAttributeValue(
+            element,
+            kAXPositionAttribute as CFString,
+            &posVal
+        ) == .success,
+           let candidate = posVal,
+           CFGetTypeID(candidate) == AXValueGetTypeID() else {
+            return nil
         }
-        if AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &sizeVal) == .success,
-           let axSize = sizeVal as! AXValue? {
-            AXValueGetValue(axSize, .cgSize, &size)
+        let axPos = candidate as! AXValue
+        guard AXValueGetValue(axPos, .cgPoint, &position) else {
+            return nil
         }
 
-        guard size.width > 0, size.height > 0 else { return nil }
+        guard AXUIElementCopyAttributeValue(
+            element,
+            kAXSizeAttribute as CFString,
+            &sizeVal
+        ) == .success,
+           let candidate = sizeVal,
+           CFGetTypeID(candidate) == AXValueGetTypeID() else {
+            return nil
+        }
+        let axSize = candidate as! AXValue
+        guard AXValueGetValue(axSize, .cgSize, &size) else {
+            return nil
+        }
+
+        return Self.validBounds(position: position, size: size)
+    }
+
+    nonisolated static func validBounds(
+        position: CGPoint,
+        size: CGSize
+    ) -> CGRect? {
+        guard position.x.isFinite,
+              position.y.isFinite,
+              size.width.isFinite,
+              size.height.isFinite,
+              size.width > 0,
+              size.height > 0 else {
+            return nil
+        }
         return CGRect(origin: position, size: size)
     }
 
     private func axCaretBounds(at caretIndex: Int, from element: AXUIElement) -> CGRect? {
         var cfRange = CFRange(location: caretIndex, length: 0)
-        guard let rangeAX = AXValueCreate(.cfRange, &cfRange) else { return nil }
+        if let rangeAX = AXValueCreate(.cfRange, &cfRange) {
+            var boundsVal: CFTypeRef?
+            let result = AXUIElementCopyParameterizedAttributeValue(
+                element,
+                kAXBoundsForRangeParameterizedAttribute as CFString,
+                rangeAX,
+                &boundsVal
+            )
+            if result == .success,
+               let candidate = boundsVal,
+               CFGetTypeID(candidate) == AXValueGetTypeID() {
+                let axBounds = candidate as! AXValue
+                var rect = CGRect.zero
+                if AXValueGetValue(axBounds, .cgRect, &rect),
+                   rect.width > 0 || rect.height > 0 {
+                    return rect
+                }
+            }
+        }
+
+        return axTextMarkerCaretBounds(from: element)
+    }
+
+    /// Chromium and Electron commonly omit `AXBoundsForRange` while exposing
+    /// the equivalent text-marker API. The selected marker range is queried
+    /// without reading field contents and yields an exact caret rect when the
+    /// host supports it.
+    private func axTextMarkerCaretBounds(
+        from element: AXUIElement
+    ) -> CGRect? {
+        var markerRange: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            element,
+            "AXSelectedTextMarkerRange" as CFString,
+            &markerRange
+        ) == .success,
+              let markerRange else {
+            return nil
+        }
 
         var boundsVal: CFTypeRef?
         let result = AXUIElementCopyParameterizedAttributeValue(
             element,
-            kAXBoundsForRangeParameterizedAttribute as CFString,
-            rangeAX,
+            "AXBoundsForTextMarkerRange" as CFString,
+            markerRange,
             &boundsVal
         )
-        guard result == .success, let axBounds = boundsVal as! AXValue? else {
+        guard result == .success else { return nil }
+        guard let candidate = boundsVal else { return nil }
+        guard CFGetTypeID(candidate) == AXValueGetTypeID() else {
             return nil
         }
+        let axBounds = candidate as! AXValue
         var rect = CGRect.zero
-        AXValueGetValue(axBounds, .cgRect, &rect)
+        guard AXValueGetValue(axBounds, .cgRect, &rect) else {
+            return nil
+        }
         return rect.width > 0 || rect.height > 0 ? rect : nil
     }
 
@@ -500,10 +833,12 @@ private func axCallback(
 extension AccessibilityObserver {
     fileprivate func handleAXNotification(notification: String) {
         guard isRunning else { return }
+        DebugLog.write("ax: notification=\(notification)")
 
         // Rebuild observer if frontmost app changed
         if let frontApp = NSWorkspace.shared.frontmostApplication,
            frontApp.processIdentifier != currentPID {
+            DebugLog.write("ax: app changed (pid \(currentPID) → \(frontApp.processIdentifier))")
             removeObserver()
             installObserver()
         } else if notification == kAXFocusedUIElementChangedNotification as String,
