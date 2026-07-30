@@ -5,14 +5,14 @@ Guardrails for coding agents (and humans) implementing nodaystypst. Read `PRD.md
 
 ## Product Lock (do not drift)
 - **Name:** nodaystypst
-- **Stack:** Native Swift 6 + SwiftUI menu-bar app
+- **Stack:** Native Swift 6 desktop app with a thin SwiftUI shell, lightweight AppKit Settings, and a persistent background completion service
 - **Inference:** OpenRouter only — **do not add a local LLM**, GGUF, MLX, llama.cpp, or embedded weights
 - **Injection:** Accessibility + non-activating ghost overlay + adapter-based Tab insert (**Approach 1**)
-- **Completion loop:** capture → debounce → predict → ghost → Tab accepts the **next shown word** / repeated Tab walks the remainder / keep typing rejects
+- **Completion loop:** capture → debounce → predict → ghost → one Tab accepts the **entire shown 2–4-word completion** / keep typing rejects / a trailing `?` suppresses before prediction
 - **Personalization:** approved local style/vocab statistics shape OpenRouter prompts — still no local inference and no raw writing history
 - **Quality:** idle RAM well under ~100MB; **hide ghost rather than misdraw**
-- **Supported / must-pass apps:** Orion Browser and Antinote only
-- **Supported bundle IDs:** `com.kagi.kagimacOS`, `com.chabomakers.Antinote`; remain content-blind and inactive elsewhere
+- **Supported / must-pass apps:** Orion, Antinote, Bear, ChatGPT, Ghostty, TextEdit, Notes, Safari, Google Chrome, and Obsidian
+- **Supported bundle IDs:** `com.kagi.kagimacOS`, `com.chabomakers.Antinote`, `net.shinyfrog.bear`, `com.openai.codex`, `com.mitchellh.ghostty`, `com.apple.TextEdit`, `com.apple.Notes`, `com.apple.Safari`, `com.google.Chrome`, and `md.obsidian`. Unknown bundles, non-editable controls, and browser address/search bars remain content-blind. Ghostty may show the ghost but never intercepts Tab.
 - **Out of Phase A:** inline typo-fix productization; prompt-assist for ChatGPT/Claude/agents
 
 ## Do
@@ -25,7 +25,8 @@ Guardrails for coding agents (and humans) implementing nodaystypst. Read `PRD.md
 - Treat untrusted caret geometry as **hide**
 - Keep the default model locked to `google/gemma-4-26b-a4b-it` unless the user explicitly changes it
 - Encrypt bounded learning statistics locally; exclude secure fields and AI-inserted text
-- Require live QA on Orion and Antinote before claiming Phase A done
+- Keep a direct Settings action that clears all encrypted learned-writing statistics
+- Require live QA on every named target before claiming Phase A done
 - Before adding an event fallback, prove the target app's bundle ID, selected adapter, missing AX notification, caret geometry, and Tab behavior
 - Any event fallback may only trigger a fresh AX snapshot; it must never record characters, bypass secure-field gating, or replace AX as the content source
 - Prefer smallest correct change; match existing project patterns once code exists
@@ -37,8 +38,8 @@ Guardrails for coding agents (and humans) implementing nodaystypst. Read `PRD.md
 - Do not log field contents by default
 - Do not store API keys in UserDefaults, plist plaintext, or source
 - Do not implement IMK as the primary path without an explicit product decision change
-- Do not ship Phase A without Orion and Antinote gates
-- Do not use Chrome, Cursor, or VS Code evidence to satisfy Phase A acceptance
+- Do not ship Phase A without every named-target gate
+- Do not use Cursor or VS Code evidence to satisfy named-target acceptance
 - Do not productize typo-fix or agent prompt-assist in Phase A
 - Do not persist raw documents, messages, chronological typing history, or reconstructed keystrokes for personalization
 - Do not create commits, publish, notarize, or change machine-wide config unless asked
@@ -63,7 +64,7 @@ Run the lowest sufficient rung; record command + result before claiming done.
 
 1. **Build** — `xcodebuild` / `swift build` as wired by the scaffold
 2. **Unit** — debounce/cancel/generation-id, secure-gate, adapter trust helpers
-3. **Manual must-pass** — Orion Browser and Antinote per TRD
+3. **Manual must-pass** — every named target per TRD
 4. **Memory** — Activity Monitor / Instruments idle footprint well under ~100MB
 5. **Negative** — password field produces no ghost; untrusted caret hides; stale responses ignored
 
@@ -75,7 +76,7 @@ Until a scaffold exists, verification for doc-only work is:
 All of the following are true with evidence:
 - Phase A loop works on must-pass apps
 - Every actual target has evidence for AX notifications, adapter selection, aligned ghost-or-safe-hide, full physical-Tab insertion, continued-typing rejection, focus retention, and secure-field blocking
-- Tab accepts the next shown word; repeated Tab accepts the remaining words one at a time
+- One Tab accepts the entire shown 2–4-word completion in writing apps; Ghostty never intercepts Tab
 - Secure fields blocked; Keychain key; silent in-field failures
 - No local LLM; RAM target held
 - Typo-fix and agent prompt-assist **not** shipped

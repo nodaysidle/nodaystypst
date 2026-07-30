@@ -41,4 +41,28 @@ struct FieldContextSnippetTests {
         #expect(context.prefix.count == 800)
         #expect(context.suffix.isEmpty)
     }
+
+    @Test("AX context window stays bounded around a UTF-16 caret")
+    func utf16ContextWindow() {
+        let ranges = FieldContext.utf16ContextWindow(
+            caretIndex: 900,
+            totalLength: 1_200
+        )
+        #expect(ranges.prefixLocation == 100)
+        #expect(ranges.prefixLength == 800)
+        #expect(ranges.suffixLocation == 900)
+        #expect(ranges.suffixLength == 160)
+        #expect(ranges.localCaretIndex == 800)
+
+        let fullValue = String(repeating: "a", count: 900)
+            + "TAIL"
+            + String(repeating: "z", count: 300)
+        let bounded = FieldContext.boundedValue(
+            fullValue,
+            caretIndex: 900
+        )
+        #expect(bounded.text.utf16.count == 960)
+        #expect(bounded.caretIndex == 800)
+        #expect(bounded.text.hasSuffix("TAIL" + String(repeating: "z", count: 156)))
+    }
 }

@@ -3,19 +3,63 @@ import Testing
 
 @Suite("CompletionCoordinator generation")
 struct CompletionCoordinatorDebounceTests {
-    @Test("predictions are limited to Orion and Antinote")
+    @Test("predictions are limited to verified application bundles")
     func supportedApps() {
-        #expect(SupportedAppPolicy.allowsPredictions(
-            bundleID: "com.kagi.kagimacOS"
+        for target in SupportedAppPolicy.targets {
+            #expect(SupportedAppPolicy.allowsPredictions(
+                bundleID: target.bundleID
+            ))
+        }
+        #expect(!SupportedAppPolicy.allowsPredictions(bundleID: "com.apple.Mail"))
+        for target in SupportedAppPolicy.safeRejectedTargets {
+            #expect(!SupportedAppPolicy.allowsPredictions(
+                bundleID: target.bundleID
+            ))
+        }
+    }
+
+    @Test("only verified editable fields pass before content capture")
+    func verifiedFieldGate() {
+        #expect(SupportedAppPolicy.allowsField(
+            bundleID: SupportedAppPolicy.textEditBundleID,
+            role: "AXTextArea",
+            metadata: []
         ))
-        #expect(SupportedAppPolicy.allowsPredictions(
-            bundleID: "com.chabomakers.Antinote"
+        #expect(!SupportedAppPolicy.allowsField(
+            bundleID: SupportedAppPolicy.chromeBundleID,
+            role: "AXTextArea",
+            metadata: ["page content"]
         ))
-        #expect(!SupportedAppPolicy.allowsPredictions(
-            bundleID: "com.openai.codex"
+        for bundleID in [
+            SupportedAppPolicy.orionBundleID,
+            SupportedAppPolicy.safariBundleID,
+            SupportedAppPolicy.obsidianBundleID,
+        ] {
+            #expect(!SupportedAppPolicy.allowsField(
+                bundleID: bundleID,
+                role: "AXTextField",
+                metadata: []
+            ))
+        }
+        #expect(!SupportedAppPolicy.allowsField(
+            bundleID: SupportedAppPolicy.chromeBundleID,
+            role: "AXTextField",
+            metadata: ["Address and search bar"]
         ))
-        #expect(!SupportedAppPolicy.allowsPredictions(
-            bundleID: "com.apple.TextEdit"
+        #expect(!SupportedAppPolicy.allowsField(
+            bundleID: SupportedAppPolicy.safariBundleID,
+            role: "AXTextField",
+            metadata: ["smart search field"]
+        ))
+        #expect(!SupportedAppPolicy.allowsField(
+            bundleID: SupportedAppPolicy.notesBundleID,
+            role: "AXButton",
+            metadata: []
+        ))
+        #expect(!SupportedAppPolicy.allowsField(
+            bundleID: "com.apple.Mail",
+            role: "AXTextArea",
+            metadata: []
         ))
     }
 
@@ -77,6 +121,25 @@ struct CompletionCoordinatorDebounceTests {
             snapshotSecure: false,
             geometryTrusted: true,
             hasAPIKey: false
+        ))
+    }
+
+    @Test("question boundaries suppress conversational answers")
+    func questionBoundarySuppression() {
+        #expect(CompletionCoordinator.shouldSuppressAfterQuestionMark(
+            prefix: "Will this answer me?"
+        ))
+        #expect(CompletionCoordinator.shouldSuppressAfterQuestionMark(
+            prefix: "Will this answer me?   \n"
+        ))
+        #expect(!CompletionCoordinator.shouldSuppressAfterQuestionMark(
+            prefix: "Will this complete"
+        ))
+        #expect(!CompletionCoordinator.shouldSuppressAfterQuestionMark(
+            prefix: "Will this answer me? Next"
+        ))
+        #expect(!CompletionCoordinator.shouldSuppressAfterQuestionMark(
+            prefix: ""
         ))
     }
 }

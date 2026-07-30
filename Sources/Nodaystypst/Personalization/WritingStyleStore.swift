@@ -13,17 +13,21 @@ actor WritingStyleStore {
 
     private let fileURL: URL
     private let keychainStore: KeychainStore
+    private let flushDebounce: UInt64
     private var profile: WritingStyleProfile?
     private var sessions: [UInt: SessionState] = [:]
+    private var flushTask: Task<Void, Never>?
 
     init(
         fileURL: URL = WritingStyleStore.defaultFileURL(),
         keychainStore: KeychainStore = KeychainStore(
             account: "writing-style-encryption-key-v1"
-        )
+        ),
+        flushDebounce: UInt64 = 2_000_000_000
     ) {
         self.fileURL = fileURL
         self.keychainStore = keychainStore
+        self.flushDebounce = flushDebounce
     }
 
     func observe(_ observation: WritingObservation) {
@@ -101,7 +105,7 @@ actor WritingStyleStore {
             sessions[observation.fieldID] = session
             profile = loaded
             if changed {
-                try persist(loaded)
+                scheduleFlush()
             }
         } catch {
             // Personalization failure must never interrupt typing or prediction.
@@ -142,8 +146,31 @@ actor WritingStyleStore {
     func resetAll() throws {
         profile = WritingStyleProfile()
         sessions.removeAll()
+        flushTask?.cancel()
+        flushTask = nil
         if FileManager.default.fileExists(atPath: fileURL.path) {
             try FileManager.default.removeItem(at: fileURL)
+        }
+    }
+
+    func scheduleFlush() {
+        flushTask?.cancel()
+        flushTask = Task { [weak self] in
+            guard let self else { return }
+            let delay = self.flushDebounce
+            try? await Task.sleep(nanoseconds: delay)
+            guard !Task.isCancelled else { return }
+            await self.flushPending()
+        }
+    }
+
+    func flushPending() {
+        flushTask = nil
+        guard let profile else { return }
+        do {
+            try persist(profile)
+        } catch {
+            // Personalization failure must never interrupt typing or prediction.
         }
     }
 

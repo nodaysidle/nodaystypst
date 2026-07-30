@@ -5,6 +5,7 @@ final class ChromeElectronAdapter: FieldAdapter {
     private static let supportedBundleIDs: Set<String> = [
         "com.google.Chrome",
         "com.google.Chrome.canary",
+        SupportedAppPolicy.obsidianBundleID,
         "com.todesktop.230313mzl4w4u92",
         "com.microsoft.VSCode",
     ]

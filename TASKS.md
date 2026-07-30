@@ -2,10 +2,10 @@
 
 ## Global Assumptions
 - Greenfield: docs exist first; scaffold only when implementation is requested
-- Stack: Native Swift 6 + SwiftUI menu-bar app; OpenRouter for predictions; **no local LLM**
+- Stack: Native Swift 6 desktop app with a thin SwiftUI shell and AppKit Settings; OpenRouter for predictions; **no local LLM**
 - Injection: Accessibility + non-activating ghost overlay + adapter-based Tab insert (Approach 1)
-- Completion loop: capture → debounce → predict → ghost → word-by-word Tab acceptance / keep-typing reject
-- Must-pass: Orion Browser and Antinote only; remain content-blind and inactive elsewhere
+- Completion loop: capture → debounce → predict → ghost → one-Tab full shown-completion acceptance / keep-typing reject
+- Must-pass: the ten verified apps in TRD; remain content-blind in unknown apps and unsafe controls
 - Every named target is a ship blocker; hide rather than misdraw
 - Privacy: secure fields blocked; Keychain for API key; short snippets; silent in-field failures
 - Debounce ~80–150ms; cancel in-flight on keystroke; timeout drops late responses; one in-flight request
@@ -14,10 +14,25 @@
 
 ## Current Takeover Status — 2026-07-29
 - Automated baseline before takeover: 64 tests across 12 suites passed
-- Implemented: Gemma 4 26B A4B default + migration, latency/privacy request policy, Orion content-blind AX refresh, word-by-word Tab, encrypted bounded global/per-app learning, Settings controls
+- Implemented: Gemma 4 26B A4B default + migration, latency/privacy request policy, evidence-gated ten-app policy, Orion/Antinote content-blind AX refresh, one-Tab 2–4-word acceptance, encrypted bounded global/per-app learning, QA Settings bridge, Settings controls
 - Current automated result: 79 tests across 14 suites passed
-- Live Orion evidence from the preceding session remains valid for alignment, secure blocking, focus, and one-time insertion; word-by-word repeated Tab and the newly packaged binary require fresh live proof
+- Live Orion evidence from the preceding session remains historical only; the newly packaged binary and all ten named targets require fresh live proof
 - Antinote live gate remains open; Orion has prior live evidence and needs confirmation on the final scoped package.
+
+## Final Installed Status — 2026-07-30
+
+- The final app is installed at `/Applications/Nodaystypst.app`; strict signing, entitlements, installed-binary matching, and the exact Accessibility code requirement pass.
+- Orion, Antinote, Bear, ChatGPT, TextEdit, Notes, Safari, and Obsidian passed live aligned-ghost and physical-Tab insertion with disposable text. Chrome is content-blind safe-rejected because live AX geometry is untrusted.
+- ChatGPT's character-event insertion was replaced with a verified atomic AX edit. Live proof preserved the exact 17-unit completion: context length 33 → 50, including the leading space and first character. Continued typing also rejected the visible ghost and preserved the user's character.
+- Ghostty remains display-only and cannot claim Tab by construction. The user uses Fish's own autosuggestion/completion and explicitly deprioritized a separate Ghostty physical-key gate.
+- Final installed background-service RSS measured 74,512 KB, below the 100 MB target. The latest source suite passes 103 tests in 16 suites.
+
+## Final usability additions — 2026-07-30
+
+- [x] Add **Clear All Learned Data** directly to the desktop Settings window.
+- [x] Reset removes the encrypted aggregate profile and active learning baselines; raw writing is never stored.
+- [x] Suppress prediction before the network call when the last non-whitespace character before the caret is `?`.
+- [x] Add focused reset and question-boundary regression tests.
 
 ## Risks
 - AX notifications, caret geometry, and Tab semantics differ across target apps — characterize before adding fallbacks or adapters
@@ -30,16 +45,16 @@
 ## Epics (Phase A build order)
 
 ## 0. Scaffolding
-**Goal:** Create a buildable menu-bar app skeleton with module stubs matching ARD/TRD.
+**Goal:** Create a buildable desktop app skeleton with module stubs matching ARD/TRD.
 
-### Create Xcode/SwiftPM macOS menu-bar project
-- LSUIElement, network client entitlement (for OpenRouter), Keychain access, Accessibility usage description
-- MenuBarExtra placeholder + Settings scene shell
+### Create Xcode/SwiftPM macOS desktop project
+- Normal Dock app, network client entitlement (for OpenRouter), Keychain access, Accessibility usage description
+- Settings window shell that leaves the completion service alive after close
 - Stub modules: AccessibilityObserver, SecureFieldGate, FieldAdapters, GhostOverlay, PredictClient, AcceptInsert, CompletionCoordinator
 
 **Acceptance Criteria**
 - Project builds for macOS
-- App appears as menu-bar only
+- App opens a visible Settings window and can reopen it from the Dock
 - Stubs compile with public interfaces from TRD
 
 **Dependencies:** None (implementation kickoff)
@@ -51,7 +66,7 @@
 
 ### Implement Accessibility permission flow
 - `AXIsProcessTrusted` / prompt; deep-link to System Settings
-- Menu bar status when denied
+- Settings status when denied
 
 ### Keychain API key Settings UI
 - Save/load OpenRouter key via Keychain only
@@ -103,7 +118,7 @@
 
 ### Implement NativeAdapter
 - `readContext`, `caretScreenRect`, `geometryTrusted`, `insertAcceptedText`
-- Wire adapter selection for Orion and Antinote; safe-hide unsupported bundles before reading field content
+- Wire adapter selection for the verified ten-app matrix; reject unknown bundles, non-editable roles, secure fields, and browser address/search bars before reading field content
 
 **Acceptance Criteria**
 - Actual NativeAdapter targets: trusted caret when available; insert works
@@ -149,7 +164,7 @@
 ---
 
 ## 7. Tab Accept Insert
-**Goal:** Tab accepts the next shown word via the active adapter; repeated Tab walks the remainder and typing rejects.
+**Goal:** One Tab accepts the entire shown 2–4-word completion via the active writing-app adapter; typing rejects. Ghostty never claims Tab.
 
 ### Implement AcceptInsert
 - Tab only when ghost visible and adapter allows
@@ -158,7 +173,7 @@
 
 **Acceptance Criteria**
 - Tab inserts the exact next word once
-- Repeated Tab inserts the remaining words one at a time without a new request
+- One Tab inserts the shown completion exactly once without leaking focus traversal into the host
 - Reject path clears ghost immediately
 
 **Dependencies:** Ghost Overlay; Predict Client; Native Adapter
@@ -176,17 +191,17 @@
 
 **Acceptance Criteria**
 - Every actual target meets the TRD bar or safely hides on untrusted geometry
-- No Chrome, Cursor, or VS Code evidence is used as completion proof
+- No Cursor or VS Code evidence is used as named-target completion proof
 
 **Dependencies:** Ghost Overlay; Predict Client; Accept Insert
 
 ---
 
 ## 9. Actual Target Gates
-**Goal:** Close Orion Browser and Antinote surfaces while unsupported apps remain inactive.
+**Goal:** Close all ten named surfaces while unknown and unsafe fields remain inactive.
 
 ### Native/web-view target passes
-- Orion and Antinote complete the full Phase A loop
+- Nine writing hosts complete the full Tab-accept loop; Ghostty completes the display/reject loop without intercepting Tab
 
 **Acceptance Criteria**
 - Both named targets meet the TRD must-pass tests
@@ -196,7 +211,7 @@
 ---
 
 ## 10. Pause / Settings Polish
-**Goal:** Usable menu-bar controls and onboarding copy.
+**Goal:** Usable desktop Settings controls and onboarding copy.
 
 ### Finish Settings
 - Model/routing default (optional), debounce display if exposed, last error (non-sensitive)
@@ -216,17 +231,25 @@
 ### Verification checklist
 - [ ] Orion Browser
 - [ ] Antinote
+- [ ] Bear
+- [x] ChatGPT
+- [x] Ghostty pass-through policy (display-only; Fish owns completion; separate physical gate user-deprioritized)
+- [ ] TextEdit
+- [ ] Notes
+- [ ] Safari content field + address-bar rejection
+- [x] Google Chrome live AX verification: no trusted caret rectangle; bundle safe-rejected before content capture
+- [ ] Obsidian
 - [ ] Unsupported-app content-blind safe hide
 - [ ] Secure field block
 - [ ] Debounce / cancel / timeout / one-in-flight
 - [ ] Idle RAM well under ~100MB
-- [ ] Tab accepts next word; repeated Tab walks the visible remainder
+- [x] One Tab accepts the entire shown completion exactly once where the adapter allows it
 - [ ] No local LLM artifacts
 - [ ] No typo-fix or agent prompt-assist features
 
 **Acceptance Criteria**
 - All boxes checked with evidence (manual notes / screenshots / Instruments memory)
-- Failures fixed or explicitly deferred only if not ship blockers (Orion and Antinote cannot defer)
+- Failures fixed or explicitly deferred only if not ship blockers (the ten named targets cannot defer)
 
 **Dependencies:** Epics 1–10
 

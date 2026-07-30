@@ -1,16 +1,16 @@
 # Technical Requirements Document — nodaystypst
 
 ## System Context
-nodaystypst is a macOS 15+ menu-bar app (Swift 6, SwiftUI + AppKit) that implements cloud ghost completion in Orion Browser and Antinote only: Accessibility capture → debounce → OpenRouter predict → non-activating ghost → word-by-word Tab acceptance / keep-typing reject. Unsupported bundles remain content-blind and inactive. Injection is Approach 1 (Accessibility + overlay + adapter insert). Encrypted local aggregate statistics personalize prompts; there is no local LLM.
+nodaystypst is a macOS 15+ desktop app (Swift 6, SwiftUI + AppKit) that implements cloud ghost completion across a verified ten-app matrix: Accessibility capture → debounce → OpenRouter predict → non-activating ghost → full shown-completion Tab acceptance / keep-typing reject. Ghostty displays completions but keeps Tab for shell completion. Unknown bundles and unsafe controls remain content-blind and inactive. Injection is Approach 1 (Accessibility + overlay + adapter insert). Encrypted local aggregate statistics personalize prompts; there is no local LLM.
 
 ## Stack Rules
 | Rule | Contract |
 | --- | --- |
 | Language | Swift 6 strict concurrency |
-| UI | SwiftUI for menu bar / settings; AppKit for overlay + AX interop |
+| UI | Thin SwiftUI app shell; AppKit for Settings, overlay, and AX interop |
 | Inference | OpenRouter only; no on-device model weights |
 | Secrets | OpenRouter API key in Keychain only |
-| Process | LSUIElement menu-bar app |
+| Process | Normal Dock app; service persists after the Settings window closes |
 | Network | Outbound HTTPS to OpenRouter for predictions |
 
 ## Permissions
@@ -19,6 +19,8 @@ nodaystypst is a macOS 15+ menu-bar app (Swift 6, SwiftUI + AppKit) that impleme
 | Accessibility (`AXIsProcessTrusted`) | Yes | Onboarding / Settings prompt; no capture, no ghost, no Tab accept |
 | Network client | Yes | Predict fails silently in-field; Settings may show last error |
 | Keychain access | Yes | Cannot save/load API key; Settings surfaces failure |
+
+Opening Settings must not focus the secure API-key field. Secure Input may engage only while the user intentionally edits that field, and saving must restore focus to a non-secure control so AeroSpace shortcuts resume.
 
 ## Distribution
 - **Direct-distribution build is intentionally non-sandboxed.** App Sandbox is removed because cross-app AX reads/observers/writes are incompatible with sandboxing. Accessibility consent is still required.
@@ -54,7 +56,7 @@ nodaystypst is a macOS 15+ menu-bar app (Swift 6, SwiftUI + AppKit) that impleme
 - **Response:** Trim to continuation only; reject empty / identical-to-prefix.
 - **Errors:** Map to silent in-field no-op; optional Settings “last failure” string (no raw key, no full prompt dump).
 
-The default model id is `google/gemma-4-26b-a4b-it`. The request sorts providers by latency, denies data-collection providers, allows same-model provider fallback, uses temperature `0.2`, and disables reasoning. The previous built-in Ministral default migrates automatically; an explicit custom model value remains intact.
+The default model id is `google/gemma-4-26b-a4b-it`. The request sorts providers by latency, denies data-collection providers, allows same-model provider fallback, uses temperature `0.2`, and disables reasoning. Previous built-in Ministral and temporary Mistral Nemo defaults migrate automatically; an explicit custom model value remains intact.
 
 ## Overlay Behavior
 | Rule | Contract |
@@ -82,26 +84,28 @@ protocol FieldAdapter {
 ```
 
 ### NativeAdapter
-- Selected for Orion (`com.kagi.kagimacOS`) and Antinote (`com.chabomakers.Antinote`).
+- Selected for Orion, Antinote, Bear, TextEdit, Notes, and Safari content fields.
 
-### Unsupported adapters
+### TerminalAdapter
+- Selected for Ghostty (`com.mitchellh.ghostty`). Reads only the trailing line as context; trusts caret geometry inside the terminal bounds. **Does not claim Tab** — shell completion is left intact. Hosts such as Opencode's TUI inherit this behaviour when run inside Ghostty.
 
-- Legacy Codex, Chromium/Electron, and terminal adapters may remain in source for future work.
-- The supported-app gate runs before reading field values. Unsupported bundles receive no prediction request, overlay, learning update, or Tab interception.
+### CodexAdapter (ChatGPT)
+- Selected for ChatGPT (`com.openai.codex`). It uses a field-anchored banner and one verified atomic AX edit. Selected-text replacement is attempted first; a full-value replacement is allowed only while the live field still exactly matches the value revalidated for that Tab press. Both paths verify the resulting value and collapsed caret before reporting success.
 
-### ChromeElectronAdapter (existing compatibility, not a Phase A ship gate)
-- Existing Chromium compatibility code may remain, but Chrome, Cursor, and VS Code evidence cannot satisfy Phase A acceptance.
-- Do not implement further Chromium-specific repairs unless the user explicitly re-scopes the product.
+### ChromeElectronAdapter
+- Selected for Obsidian content fields. Chrome reaches this adapter in isolated adapter tests, but the product policy rejects its bundle before content reads because live AX provides no trusted caret rectangle.
+- Cursor and VS Code remain excluded because code-editor Tab semantics are not part of this product gate.
 
 ### Adapter selection
 - Match by bundle identifier first, then AX role heuristics.
-- Supported-app gate first; unsupported bundle → content-blind safe hide.
+- Bundle + editable-role + secure + browser-chrome metadata gates run before value reads; unknown bundles, browser address/search bars, and unsupported roles → content-blind safe hide.
 
 ## Tab Accept Default
-- When ghost is visible and `shouldOfferTabAccept()` is true: **Tab accepts the next shown word**.
+- When ghost is visible and `shouldOfferTabAccept()` is true: **one Tab accepts the entire shown 2–4-word completion**.
 - Leading boundary whitespace and punctuation attached to that word are accepted with it.
-- The unaccepted remainder is re-anchored at the new caret and remains available for repeated Tab presses without another request.
+- The overlay hides after insertion; the next completion requires fresh context.
 - Keep typing rejects the visible remainder.
+- When the last non-whitespace character before the caret is `?`, suppress before the OpenRouter call and show no ghost.
 
 ## Secure Field Rules
 Block predict + ghost + Tab accept when any of:
@@ -140,21 +144,31 @@ On block: silent no-op.
 
 ### Shared
 1. Grant Accessibility; save OpenRouter key to Keychain; confirm idle memory well under ~100MB.
-2. Type in a normal field → after debounce, ghost appears only if aligned → Tab inserts the next word and repeated Tab walks the remainder.
+2. Type in a normal field → after debounce, ghost appears only if aligned → one Tab inserts the entire shown completion.
 3. Type while ghost visible → ghost clears; no late response reappears for old generation.
 4. Focus a password field → no request / no ghost (verify via network/debug flag, not by logging secrets).
-5. Pause from menu bar → no ghosts anywhere.
+5. Pause from Settings → no ghosts anywhere.
+6. End text with `?` (with or without trailing whitespace) → no request and no ghost until another non-whitespace character is typed.
+7. Choose **Clear All Learned Data** in Settings → encrypted aggregate profile is removed; raw writing is unaffected because it is never stored.
 
 ### Actual target matrix
 
 For each target below, record the real bundle identifier, selected adapter, AX value/selection notification behavior, caret geometry, and insertion behavior before changing fallback code.
 
-| Target | Bundle ID | Initial adapter |
-| --- | --- | --- |
-| Orion Browser | `com.kagi.kagimacOS` | NativeAdapter |
-| Antinote | `com.chabomakers.Antinote` | NativeAdapter |
+| Target | Bundle ID | Adapter | Tab accept |
+| --- | --- | --- | --- |
+| Orion Browser | `com.kagi.kagimacOS` | NativeAdapter | yes |
+| Antinote | `com.chabomakers.Antinote` | NativeAdapter | yes |
+| Bear | `net.shinyfrog.bear` | NativeAdapter | yes |
+| ChatGPT | `com.openai.codex` | CodexAdapter | yes |
+| Ghostty | `com.mitchellh.ghostty` | TerminalAdapter | **no** (shell completion intact) |
+| TextEdit | `com.apple.TextEdit` | NativeAdapter | yes |
+| Notes | `com.apple.Notes` | NativeAdapter | yes |
+| Safari | `com.apple.Safari` | NativeAdapter | yes, content fields only |
+| Google Chrome | `com.google.Chrome` | Safe-rejected before content | no |
+| Obsidian | `md.obsidian` | ChromeElectronAdapter | yes |
 
-Both targets must prove: 2–4-word contextual ghost; correct boundary spacing; aligned ghost or safe hide; physical Tab inserts the next visible word exactly once; repeated Tab walks the remainder; continued typing rejects it; no focus steal; and secure/password fields produce no request and no ghost. Unsupported apps must remain content-blind and inactive.
+All enabled and display-only targets must prove: 2–4-word contextual ghost (or, for Ghostty, on the trailing line); correct boundary spacing; aligned ghost or safe hide; physical Tab inserts the entire shown completion exactly once (except Ghostty, which has no Tab claim); continued typing rejects; no focus steal; secure/password fields produce no request and no ghost. Chrome must prove content-blind safe rejection. Unknown apps and unsafe controls must remain content-blind and inactive.
 
 An event fallback is allowed only after the same target reproduces a missing-notification defect. It may only trigger a fresh AX snapshot, must not record characters, must not replace AX as the content source, and must not bypass SecureFieldGate.
 

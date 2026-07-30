@@ -1,7 +1,7 @@
 # Architecture Requirements Document — nodaystypst
 
 ## System Overview
-nodaystypst is a native macOS menu-bar app (Swift 6 + SwiftUI) that observes focused text fields only in Orion Browser and Antinote, requests short completions from OpenRouter, and paints a non-activating ghost overlay at the caret. Tab accepts word-by-word. Other app bundles remain content-blind and inactive. Encrypted, bounded global and per-app writing statistics shape later prompts. There is no local LLM: RAM stays low because no model weights are loaded.
+nodaystypst is a native macOS desktop app (Swift 6 + SwiftUI) that observes verified editable AX fields across native, browser, and Electron hosts, requests short completions from OpenRouter, and paints a non-activating ghost overlay at the caret. One Tab accepts the shown 2–4-word completion in writing apps; Ghostty keeps Tab for shell completion. Unknown bundles and unsafe controls remain content-blind and inactive. Encrypted, bounded global and per-app writing statistics shape later prompts. There is no local LLM: RAM stays low because no model weights are loaded.
 
 ## Architecture Style
 Modular service architecture with thin SwiftUI shell:
@@ -32,7 +32,7 @@ Why Approach 1:
 
 ```text
 ┌─────────────────────────────────────────────────────────────┐
-│ MenuBar / Settings (SwiftUI)  ·  Keychain (API key)         │
+│ Desktop Settings (AppKit)  ·  Keychain (API key)            │
 └─────────────┬───────────────────────────────────────────────┘
               │
 ┌─────────────▼───────────────────────────────────────────────┐
@@ -56,10 +56,11 @@ Observer       Gate         (OpenRouter)   (non-activ.)  + FieldAdapters
 
 ### FieldAdapters
 - Protocol: read context, resolve caret screen rect (or fail), insert accepted text, optionally claim Tab
-- **NativeAdapter** — selected for Orion (`com.kagi.kagimacOS`) and Antinote (`com.chabomakers.Antinote`)
-- Legacy Codex, terminal, and Chromium adapters may remain in source but cannot receive field content, request predictions, display overlays, or intercept Tab under the supported-app gate.
-- **ChromeElectronAdapter** — existing compatibility path only; Chrome, Cursor, and VS Code are not Phase A acceptance surfaces and must not drive new fallback work without explicit re-scope
-- Supported-app gating runs before field-value reads; unknown and unsupported apps remain content-blind and inactive
+- **NativeAdapter** — selected for Orion, Antinote, Bear, TextEdit, Notes, and Safari web-content fields
+- **TerminalAdapter** — selected for Ghostty (`com.mitchellh.ghostty`); reads only the trailing line, trusts geometry inside the terminal bounds, and **never** claims Tab so shell completion keeps working. Hosts such as Opencode's TUI inherit this behaviour when run inside Ghostty.
+- **CodexAdapter** — selected for ChatGPT (`com.openai.codex`); field-anchored banner, verified atomic AX insertion, Tab accept enabled.
+- **ChromeElectronAdapter** — selected for verified Obsidian content fields; Chrome remains policy-rejected because its live AX text area exposes no trusted caret rectangle, while Cursor and VS Code remain excluded code-editor surfaces
+- Bundle, editable-role, secure-field, and browser-chrome metadata gates all run before field-value reads; unknown apps, address/search bars, and unsupported roles remain content-blind
 - Event fallbacks are evidence-gated per actual target and may only trigger a fresh AX snapshot. AX remains the content source and SecureFieldGate remains mandatory.
 - Orion and Antinote's proven missing-notification paths use a listen-only, content-blind key event wake-up. It inspects no key payload and only schedules a fresh AX read.
 
@@ -74,17 +75,23 @@ Observer       Gate         (OpenRouter)   (non-activ.)  + FieldAdapters
 - Cancel in-flight on new keystroke after debounce restart
 - Timeout: drop late responses; never apply stale ghost
 - Exactly one in-flight request at a time
+- CompletionCoordinator suppresses the request when the last non-whitespace character before the caret is `?`
 
 ### AcceptInsert
 - Listens for Tab when a ghost is visible and adapter allows
-- Accept the **next shown word** and preserve the remainder
+- Accept the **entire shown 2–4-word completion** when the adapter permits Tab
 - Inserts via active adapter; clears ghost
 - Keep-typing: any other character rejects ghost and restarts debounce loop
 
 ### Settings / Keychain
 - OpenRouter API key in Keychain only (not UserDefaults plaintext)
 - Pause/resume global prediction
+- Settings action to delete all encrypted learned-writing statistics
 - Accessibility trust status and deep-link to System Settings
+- Compatibility matrix and non-sensitive host/adapter/geometry diagnostics
+- Normal launch opens the desktop Settings window; closing it leaves prediction running, and reopening the Dock app restores the window
+- Explicit `--qa-settings` launch adds non-sensitive diagnostics to that Settings window
+- The initial responder is a normal prediction control, never the secure API-key field; saving the key restores that safe focus so AeroSpace is not blocked by persistent Secure Input
 
 ## Data Flow (Phase A)
 
@@ -108,7 +115,7 @@ keystroke / AX value change
         ▼
  GhostOverlay.show(text, frame)   # only if still current + aligned
         │
-        ├── Tab ──► AcceptInsert → adapter.insert(next word) → keep remainder
+        ├── Tab ──► AcceptInsert → adapter.insert(shown completion)
         └── type ──► reject → hide → loop
 ```
 
@@ -128,10 +135,10 @@ keystroke / AX value change
 - Default model: `google/gemma-4-26b-a4b-it`; OpenRouter providers sorted by latency; reasoning disabled
 
 ## Frontend Architecture
-- SwiftUI MenuBarExtra + Settings scene
+- Lightweight native AppKit Settings content in an AppKit-managed desktop window; SwiftUI remains only as the application scene/command shell
 - AppKit for overlay window and AX / event integration
 - Observation (`@Observable`) for UI state; services on `@MainActor` or explicitly isolated actors where needed
-- LSUIElement = YES (menu bar only)
+- LSUIElement = NO (normal Dock app; completion service remains alive with no open windows)
 
 ## Backend / Network
 - Outbound HTTPS to OpenRouter only (for predictions)
@@ -157,13 +164,13 @@ keystroke / AX value change
 | Overlay vs IMK | Better install UX and hide-on-failure; harder perfect caret in web views |
 | Cloud vs local LLM | Low RAM, needs network + user key; latency depends on OpenRouter |
 | Adapter matrix | More code per app class; add only after an actual target reproduces a generic adapter defect |
-| Word-by-word Tab | Keeps the user in control; requires preserving and re-anchoring the unaccepted remainder |
+| Bounded full-phrase Tab | One deliberate action completes the visible phrase; the 2–4-word cap prevents uncontrolled insertion |
 | Aggregate personalization | Learns useful repetition without raw history; subtler than retaining full text |
 | Silent in-field failures | Cleaner typing; settings must surface API/permission issues |
 
 ## Non-Functional Requirements
 - Swift 6 strict concurrency
 - Privacy: short snippets only; no default field-content logs
-- Orion and Antinote: live evidence required; never show a misaligned ghost
+- Every named target: live evidence required; never show a misaligned ghost
 - Secure fields always blocked
 - Phase A must not productize typo-fix or agent prompt-assist

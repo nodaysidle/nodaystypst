@@ -14,27 +14,34 @@
 
 ## What it does
 
-nodaystypst watches the text field you are actively writing in, sends a short bounded context window to OpenRouter, and displays a subtle 2–4-word completion beside the caret. Press **Tab** to accept the next word. Keep typing to dismiss it.
+nodaystypst watches the text field you are actively writing in, sends a short bounded context window to OpenRouter, and displays a subtle 2–4-word completion beside the caret. Press **Tab** once to accept the entire shown completion. Keep typing to dismiss it. A question mark at the end of the current text suppresses prediction so the model never tries to answer the question as if it were a conversation.
 
-The current release is intentionally focused on two verified writing surfaces:
+The current supported surfaces are:
 
 - **Orion Browser** (`com.kagi.kagimacOS`)
 - **Antinote** (`com.chabomakers.Antinote`)
+- **Bear** (`net.shinyfrog.bear`)
+- **ChatGPT** (`com.openai.codex`)
+- **Ghostty** (`com.mitchellh.ghostty`) — shows predictions but keeps Tab for shell completion
+- **TextEdit** (`com.apple.TextEdit`)
+- **Notes** (`com.apple.Notes`)
+- **Safari** (`com.apple.Safari`) — web-content fields only
+- **Obsidian** (`md.obsidian`)
 
-Every other app stays content-blind and inactive: no field-value read, prediction request, learning update, overlay, or Tab interception.
+Google Chrome (`com.google.Chrome`) is explicitly safe-rejected on the current build: live AX exposes editable content but no trustworthy caret rectangle. Chrome therefore stays content-blind rather than showing a potentially misplaced ghost. Unknown apps, non-editable controls, browser address/search bars, and code-editor surfaces are likewise inactive: no field-value read, prediction request, learning update, overlay, or Tab interception.
 
 ## Why it feels lightweight
 
 - Inference runs in the cloud through OpenRouter—no GGUF, MLX, llama.cpp, or model weights.
 - The default model is locked to `google/gemma-4-26b-a4b-it` and routed for latency with reasoning disabled.
-- An 80 ms debounce, one in-flight request, cancellation, generation checks, and a four-second timeout prevent stale completions.
-- The menu-bar app has no Dock presence and targets an idle footprint well below 100 MB.
+- An 80 ms debounce, one in-flight request, cancellation, generation checks, and a six-second timeout prevent stale completions.
+- The native app keeps prediction running after its Settings window closes and targets an idle footprint well below 100 MB.
 
 ## Learns your writing—without keeping your writing
 
 nodaystypst gradually adapts to repeated vocabulary, short phrases, punctuation, capitalization, and sentence-length tendencies.
 
-It does **not** store documents, messages, chronological typing history, secure-field contents, or AI-inserted completions. The local profile contains bounded aggregate counters, is encrypted with AES-GCM, and uses a random key stored in Keychain. Learning can be disabled or reset globally or per supported app.
+It does **not** store documents, messages, chronological typing history, secure-field contents, or AI-inserted completions. The local profile contains bounded aggregate counters, is encrypted with AES-GCM, and uses a random key stored in Keychain. Learning can be disabled or reset globally or per supported app. **Clear All Learned Data** in Settings immediately removes the encrypted aggregate profile.
 
 ## Privacy and safety
 
@@ -64,7 +71,7 @@ No paid Apple Developer account is required to build the app locally. Local buil
 git clone https://github.com/nodaysidle/nodaystypst.git
 cd nodaystypst
 swift test
-MENU_BAR_APP=1 Scripts/package_app.sh release
+Scripts/package_app.sh release
 open Nodaystypst.app
 ```
 
@@ -79,10 +86,21 @@ Because the app uses a local ad-hoc signature, replace its entry in **System Set
 ## First run
 
 1. Launch `Nodaystypst.app`.
-2. Open its menu-bar item and choose **Open Settings…**.
-3. Save your OpenRouter key in the secure field.
-4. Grant Accessibility access to the exact installed app path.
-5. Write in Orion or Antinote, pause briefly, and press Tab when the grey completion appears.
+2. In the Settings window, save your OpenRouter key in the secure field and choose whether predictions and learning are enabled.
+3. Grant Accessibility access to the exact installed app path.
+4. Use **Clear All Learned Data** whenever you want to remove the encrypted aggregate writing profile.
+5. Close Settings if you want; prediction continues in the background and the Dock icon reopens it.
+6. Write in any compatible content field, pause briefly, and press Tab when the grey completion appears. Ghostty can show a completion but keeps Tab for shell completion.
+
+Settings never focuses the secure API-key field automatically, so opening the app does not disable AeroSpace shortcuts. macOS Secure Input is active only while you intentionally click and edit that protected field; saving the key moves focus back to a normal control.
+
+For additional non-sensitive diagnostics, launch the installed app explicitly with:
+
+```bash
+open -na /Applications/Nodaystypst.app --args --qa-settings
+```
+
+Normal launches show the same desktop Settings window without the QA-only diagnostics section. Closing the window leaves the lightweight completion service running; click the Dock icon to reopen it.
 
 ## Architecture
 
@@ -97,7 +115,7 @@ AccessibilityObserver ──► SecureFieldGate ──► CompletionCoordinator
         └── WritingStyleStore (encrypted aggregate profile)
 ```
 
-The implementation is a native SwiftPM menu-bar executable with SwiftUI for settings and AppKit/ApplicationServices for Accessibility, overlay placement, and insertion.
+The implementation is a native SwiftPM desktop app with a lightweight AppKit Settings window and AppKit/ApplicationServices for Accessibility, overlay placement, and insertion. A thin SwiftUI scene shell supplies the macOS application lifecycle and commands.
 
 ## Verification
 
@@ -109,11 +127,11 @@ Run everything with:
 swift test
 ```
 
-Live release checks are performed in Orion and Antinote. A field must either show a correctly aligned ghost or safely show nothing—misaligned output is never accepted as a fallback.
+Live release checks cover the ten-app compatibility matrix. A field must either show a correctly aligned ghost or safely show nothing—misaligned output is never accepted as a fallback.
 
 ## Project status
 
-This is an early macOS release focused on a small, reliable surface rather than claiming universal app support. The product direction is simple: start useful, learn repeated writing tendencies over normal use, and stay out of the way everywhere else.
+This is an early macOS release focused on a verified compatibility matrix rather than claiming universal app support. The product direction is simple: expand only with AX evidence, learn repeated writing tendencies over normal use, and stay out of the way everywhere else.
 
 ---
 

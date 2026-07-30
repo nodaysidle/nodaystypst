@@ -6,8 +6,8 @@ import CoreGraphics
 /// zero-length and character-range bounds are pinned to the screen edge.
 /// Rather than synthesize an unreliable inline caret, this adapter returns
 /// the verified field rectangle for a visually distinct field-anchored ghost.
-/// The fallback is deliberately limited to a collapsed selection at the end
-/// of a non-empty value.
+/// Acceptance is deliberately limited to a collapsed selection at the end of
+/// a non-empty value and is applied as one verified AX edit by AcceptInsert.
 final class CodexAdapter: FieldAdapter {
     static let bundleID = "com.openai.codex"
 

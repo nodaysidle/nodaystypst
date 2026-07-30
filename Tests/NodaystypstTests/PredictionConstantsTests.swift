@@ -18,15 +18,16 @@ struct PredictionConstantsTests {
         #expect(PredictionConstants.maxPrefixCharacters <= PredictionConstants.hardMaxPrefixCharacters)
     }
 
-    @Test("Gemma 4 timeout is four seconds")
+    @Test("Gemma 4 timeout tolerates the observed cloud latency tail")
     func gemmaTimeout() {
-        #expect(PredictionConstants.requestTimeout == 4.0)
+        #expect(PredictionConstants.requestTimeout == 6.0)
     }
 
-    @Test("default model is Gemma 4 26B A4B")
+    @Test("default model is Gemma 4")
     func defaultModelId() {
         #expect(PredictionConstants.defaultModelId == "google/gemma-4-26b-a4b-it")
         #expect(PredictionConstants.retiredDefaultModelIds.contains("mistralai/ministral-3b-2512"))
+        #expect(PredictionConstants.retiredDefaultModelIds.contains("mistralai/mistral-nemo"))
     }
 
     @Test("maxCompletionWords is exactly 4")

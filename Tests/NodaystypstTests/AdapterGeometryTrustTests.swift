@@ -369,6 +369,7 @@ struct AdapterGeometryTrustTests {
         let bundleIDs = [
             "com.google.Chrome",
             "com.google.Chrome.canary",
+            SupportedAppPolicy.obsidianBundleID,
             "com.todesktop.230313mzl4w4u92",
             "com.microsoft.VSCode",
         ]

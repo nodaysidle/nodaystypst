@@ -15,20 +15,19 @@ struct AcceptInsertPolicyTests {
         )
     }
 
-    @Test("Codex accepts its full bounded banner while native apps accept one word")
-    func appSpecificAcceptance() {
-        #expect(
-            AcceptInsert.acceptance(
-                in: " be a reliable feature.",
-                bundleID: "com.openai.codex"
-            ) == .init(accepted: " be a reliable feature.", remaining: "")
-        )
-        #expect(
-            AcceptInsert.acceptance(
-                in: " be a reliable feature.",
-                bundleID: "com.kagi.kagimacOS"
-            ) == .init(accepted: " be", remaining: " a reliable feature.")
-        )
+    @Test("One Tab accepts the full shown completion in writing apps")
+    func fullCompletionAcceptance() {
+        for bundleID in SupportedAppPolicy.tabAcceptTargets.map(\.bundleID) {
+            #expect(
+                AcceptInsert.acceptance(
+                    in: " be a reliable feature.",
+                    bundleID: bundleID
+                ) == .init(
+                    accepted: " be a reliable feature.",
+                    remaining: ""
+                )
+            )
+        }
     }
 
     @Test("word acceptance is Unicode and punctuation safe")
@@ -55,19 +54,21 @@ struct AcceptInsertPolicyTests {
         #expect(!AcceptInsert.shouldAcceptTab(ghostVisible: true, adapterAllows: false))
     }
 
-    @Test("only Codex uses caret-preserving synthetic text insertion")
+    @Test("WordAcceptance is preserved exactly for empty and single-token cases")
+    func acceptanceBoundaryCases() {
+        #expect(AcceptInsert.nextWord(in: "") == nil)
+        let only = AcceptInsert.nextWord(in: "only")
+        #expect(only?.accepted == "only")
+        #expect(only?.remaining == "")
+    }
+
+    @Test("only Codex uses verified atomic Accessibility insertion")
     func codexInsertionRoute() {
-        #expect(AcceptInsert.usesSyntheticTextInsertion(
+        #expect(AcceptInsert.usesAtomicAccessibilityInsertion(
             bundleID: "com.openai.codex"
         ))
-        #expect(!AcceptInsert.usesSyntheticTextInsertion(
+        #expect(!AcceptInsert.usesAtomicAccessibilityInsertion(
             bundleID: "com.kagi.kagimacOS"
-        ))
-        #expect(AcceptInsert.requiresDeferredTabAcceptance(
-            adapterKind: "codex"
-        ))
-        #expect(!AcceptInsert.requiresDeferredTabAcceptance(
-            adapterKind: "native"
         ))
     }
 
